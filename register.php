@@ -2,7 +2,7 @@
 require_once __DIR__ . "/database.php";
 
 if (!function_exists('getDBConnection')) {
-    die("❌ database.php loaded, but getDBConnection() NOT found");
+    die(" database.php loaded, but getDBConnection() NOT found");
 }
 
 $db = new Database();
