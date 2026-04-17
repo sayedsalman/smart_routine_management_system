@@ -1,14 +1,14 @@
 <?php
 $db_host = "localhost";
-$db_name = "rfnhscco_routine";
+$db_name = "routine";
 $db_user = "root";
 $db_pass = 'a';
 
 class Database {
     private $host = "localhost";
-    private $db_name = "rfnhscco_routine";
-    private $username = "rfnhscco_routine";
-    private $password = 'abO(sOQ}AhmZ$yd4';
+    private $db_name = "routine";
+    private $username = "routine";
+    private $password = '';
     private $conn;
 
 
