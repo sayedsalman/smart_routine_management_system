@@ -1,16 +1,15 @@
 <?php
 $db_host = "localhost";
-$db_name = "routine";
+$db_name = "rfnhscco_routine";
 $db_user = "root";
 $db_pass = 'a';
 
 class Database {
     private $host = "localhost";
-    private $db_name = "routine";
-    private $username = "routine";
-    private $password = '';
+    private $db_name = "rfnhscco_routine";
+    private $username = "rfnhscco_routine";
+    private $password = 'abO(sOQ}AhmZ$yd4';
     private $conn;
-
 
     public function connect() {
         $this->conn = new mysqli(
@@ -21,7 +20,6 @@ class Database {
         );
 
         if ($this->conn->connect_error) {
-       
             die("Database connection failed: " . $this->conn->connect_error);
         }
 
@@ -30,7 +28,6 @@ class Database {
 
         return $this->conn;
     }
-
 
     public function close() {
         if ($this->conn) {
@@ -52,7 +49,6 @@ function getDBConnection() {
         die("Database connection error: " . $e->getMessage());
     }
 }
-
 
 // $db = new Database();
 // $conn = $db->connect();
