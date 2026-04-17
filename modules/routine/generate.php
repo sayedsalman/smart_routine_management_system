@@ -1,5 +1,5 @@
 <?php
-// generate.php – same as previous version
+
 require_once 'scheduler_functions.php';
 require_once '../../database.php';
 
