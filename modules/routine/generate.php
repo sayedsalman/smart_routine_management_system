@@ -1,11 +1,5 @@
 <?php
-/**
- * GUARANTEED 100% ROUTINE GENERATOR – Hybrid + Bruteforce Fallback
- * 
- * - First pass: intelligent hybrid (hard + soft constraints)
- * - Second pass (if needed): brute force that ignores all but the most essential constraints
- * - Ensures every weekly class is assigned a time and room
- */
+
 
 require_once '../../database.php';
 $conn = getDBConnection();
