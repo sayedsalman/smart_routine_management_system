@@ -18,8 +18,8 @@ if (isset($_GET['export_template'])) {
         case 'teachers': $csv_data = [['Username','Teacher ID','Department Code','Designation','Max Classes/Day','Available Days'],['salman','TCH001','CSE','Lecturer',3,'Sunday,Monday,Tuesday'],['atiq','TCH002','CSE','Professor',3,'Monday,Tuesday,Wednesday']]; break;
         case 'classrooms': $csv_data = [['Room Name','Capacity','Type','Department Code (Optional)','Has Projector (0/1)','Has AC (0/1)'],['Room 101',50,'both','CSE',1,0],['Lab 1',30,'lab','CSE',0,1]]; break;
         case 'timeslots': $csv_data = [['Start Time','End Time'],['08:30:00','10:00:00'],['10:15:00','11:45:00']]; break;
-        case 'batch_courses': $csv_data = [['Department Code','Semester','Section','Type','Course Code'],['CSE','31','C','Day','CSE101'],['CSE','31','C','Day','CSE102']]; break;
-        case 'teacher_courses': $csv_data = [['Teacher ID','Course Code'],['TCH001','CSE101'],['TCH002','CSE102']]; break;
+        case 'batch_courses': $csv_data = [['Department Code','Semester','Section','Type','Course Code','Teacher ID (mandatory)'],['CSE','31','C','Day','CSE101','TCH001'],['CSE','31','C','Evening','CSE102','TCH002']]; break;
+        case 'room_slots': $csv_data = [['day','timeslot_start','timeslot_end','room_name','department_code (optional)'],['Saturday','08:30:00','09:55:00','308','CSE'],['Saturday','10:00:00','11:25:00','A220','']]; break;
         default: exit;
     }
     header('Content-Type: text/csv; charset=utf-8');
@@ -30,9 +30,78 @@ if (isset($_GET['export_template'])) {
     exit;
 }
 
+// ---------- PDF EXPORT (Print view) ----------
+if (isset($_GET['print_dept_routine'])) {
+    $dept_id = (int)$_GET['print_dept_routine'];
+    $dept = $conn->query("SELECT name, code FROM departments WHERE id = $dept_id")->fetch_assoc();
+    if (!$dept) exit("Invalid department");
+    $batches = $conn->query("SELECT * FROM batches WHERE department_id = $dept_id ORDER BY semester, section");
+    $gen_id = $conn->query("SELECT MAX(generation_id) as gen FROM routine_assignments")->fetch_assoc()['gen'];
+    $timeslots = $conn->query("SELECT * FROM timeslots ORDER BY start_time")->fetch_all(MYSQLI_ASSOC);
+    $days = ['Saturday','Sunday','Monday','Tuesday','Wednesday','Thursday','Friday'];
+    ?>
+    <!DOCTYPE html>
+    <html>
+    <head><title><?= $dept['name'] ?> Routine</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h2 { text-align: center; }
+        .batch-table { width: 100%; border-collapse: collapse; margin-bottom: 30px; page-break-after: avoid; }
+        .batch-table th, .batch-table td { border: 1px solid #ddd; padding: 6px; font-size: 12px; }
+        .batch-table th { background: #f2f2f2; }
+        .page-break { page-break-before: always; }
+        @media print { body { margin: 0; } .no-print { display: none; } }
+    </style>
+    </head>
+    <body>
+    <button class="no-print" onclick="window.print()">Print / Save PDF</button>
+    <?php while($batch = $batches->fetch_assoc()): 
+        $offDays = [$batch['off_day1']];
+        if($batch['off_day2']) $offDays[] = $batch['off_day2'];
+        $displayDays = array_diff($days, $offDays);
+        if($batch['type'] == 'Evening') $displayDays = $days;
+        $displayDays = array_values($displayDays);
+    ?>
+    <h3><?= $dept['code'] ?> – Batch <?= $batch['semester'].$batch['section'] ?> (<?= $batch['type'] ?>)</h3>
+    <table class="batch-table">
+        <thead><tr><th>Time</th><?php foreach($displayDays as $d): ?><th><?= $d ?></th><?php endforeach; ?></tr></thead>
+        <tbody>
+        <?php foreach($timeslots as $slot): ?>
+        <tr>
+            <td><?= date('h:i A', strtotime($slot['start_time'])) ?> - <?= date('h:i A', strtotime($slot['end_time'])) ?></td>
+            <?php foreach($displayDays as $day): ?>
+            <td>
+                <?php
+                $res = $conn->query("
+                    SELECT c.code, u.username, cr.room_name
+                    FROM routine_assignments ra
+                    JOIN courses c ON ra.course_id = c.id
+                    JOIN teachers t ON ra.teacher_id = t.id
+                    JOIN users u ON t.user_id = u.id
+                    JOIN classrooms cr ON ra.classroom_id = cr.id
+                    WHERE ra.batch_id = {$batch['id']}
+                      AND ra.day = '$day'
+                      AND ra.timeslot_id = {$slot['id']}
+                      AND ra.generation_id = $gen_id
+                ");
+                while($row = $res->fetch_assoc()):
+                ?>
+                <div><strong><?= $row['code'] ?></strong><br><?= $row['username'] ?><br><small><?= $row['room_name'] ?></small></div>
+                <?php endwhile; ?>
+            </td>
+            <?php endforeach; ?>
+        </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+    <?php endwhile; ?>
+    </body>
+    </html>
+    <?php exit;
+}
+
 $conn = getDBConnection();
 
-// Helper functions with improved error reporting
 function execute($conn, $sql, $types = null, ...$params) {
     $stmt = $conn->prepare($sql);
     if (!$stmt) {
@@ -156,7 +225,12 @@ if (isset($_GET['del_timeslot'])) { $conn->query("DELETE FROM timeslots WHERE id
 
 // Classrooms
 if (isset($_POST['classroom_action'])) {
-    $room_name = $_POST['room_name']; $capacity = (int)$_POST['capacity']; $dept_id = !empty($_POST['department_id']) ? (int)$_POST['department_id'] : null; $projector = isset($_POST['has_projector']) ? 1 : 0; $ac = isset($_POST['has_ac']) ? 1 : 0; $type = $_POST['type'];
+    $room_name = $_POST['room_name'];
+    $capacity = (int)$_POST['capacity'];
+    $dept_id = !empty($_POST['department_id']) ? (int)$_POST['department_id'] : null;
+    $projector = 1; $ac = 1;
+    $type = $_POST['type'];
+    if (preg_match('/[Ll]$/', $room_name)) $type = 'lab';
     if ($_POST['classroom_action'] == 'create') {
         $sql = "INSERT INTO classrooms (room_name, capacity, department_id, has_projector, has_ac, type) VALUES (?, ?, ?, ?, ?, ?)";
         if (execute($conn, $sql, "siiiss", $room_name, $capacity, $dept_id, $projector, $ac, $type)) $msg = "Classroom created.";
@@ -168,72 +242,203 @@ if (isset($_POST['classroom_action'])) {
 }
 if (isset($_GET['del_classroom'])) { $conn->query("DELETE FROM classrooms WHERE id=".(int)$_GET['del_classroom']); $msg = "Deleted."; }
 
-// Batch-Course Assignments
+// Batch-Course Assignments (mandatory teacher)
 if (isset($_POST['assign_batch_course'])) {
     $batch_id = (int)$_POST['batch_id'];
-    foreach ($_POST['course_ids'] ?? [] as $cid) {
-        $conn->query("INSERT IGNORE INTO batch_courses (batch_id, course_id) VALUES ($batch_id, $cid)");
+    $course_ids = $_POST['course_ids'] ?? [];
+    $teacher_ids = $_POST['teacher_ids'] ?? [];
+    for ($i = 0; $i < count($course_ids); $i++) {
+        $course_id = (int)$course_ids[$i];
+        $teacher_id = (int)$teacher_ids[$i];
+        if ($teacher_id > 0) {
+            $stmt = $conn->prepare("INSERT INTO batch_courses (batch_id, course_id, teacher_id) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE teacher_id = VALUES(teacher_id)");
+            $stmt->bind_param("iii", $batch_id, $course_id, $teacher_id);
+            $stmt->execute();
+            $stmt->close();
+        } else {
+            $error = "Teacher selection is mandatory for each course.";
+        }
     }
-    $msg = "Assigned courses to batch.";
+    if (empty($error)) $msg = "Assigned courses to batch with teachers.";
 }
 if (isset($_GET['remove_bc'])) { $conn->query("DELETE FROM batch_courses WHERE id=".(int)$_GET['remove_bc']); $msg = "Removed."; }
 
-// Teacher-Course Assignments
-if (isset($_POST['assign_teacher_course'])) {
-    $teacher_id = (int)$_POST['teacher_id'];
-    foreach ($_POST['course_ids'] ?? [] as $cid) {
-        $conn->query("INSERT IGNORE INTO teacher_courses (teacher_id, course_id) VALUES ($teacher_id, $cid)");
+// Room Slot Restrictions
+if (isset($_POST['save_room_slot'])) {
+    $room_id = (int)$_POST['room_id'];
+    $day = $_POST['day'];
+    $timeslot_id = (int)$_POST['timeslot_id'];
+    $dept_id = !empty($_POST['department_id']) ? (int)$_POST['department_id'] : null;
+    $action = $_POST['room_slot_action'];
+    if ($action == 'create') {
+        $stmt = $conn->prepare("INSERT IGNORE INTO room_slot_restrictions (room_id, day, timeslot_id, department_id, is_blocked) VALUES (?, ?, ?, ?, 1)");
+        $stmt->bind_param("isii", $room_id, $day, $timeslot_id, $dept_id);
+        if ($stmt->execute()) $msg = "Restriction added.";
+        else $error = $stmt->error;
+        $stmt->close();
+    } elseif ($action == 'update') {
+        $id = (int)$_POST['restriction_id'];
+        $stmt = $conn->prepare("UPDATE room_slot_restrictions SET room_id=?, day=?, timeslot_id=?, department_id=? WHERE id=?");
+        $stmt->bind_param("isiii", $room_id, $day, $timeslot_id, $dept_id, $id);
+        if ($stmt->execute()) $msg = "Restriction updated.";
+        else $error = $stmt->error;
+        $stmt->close();
     }
-    $msg = "Assigned teacher to courses.";
 }
-if (isset($_GET['remove_tc'])) { $conn->query("DELETE FROM teacher_courses WHERE id=".(int)$_GET['remove_tc']); $msg = "Removed."; }
-
-// Teacher Preferences
-if (isset($_POST['save_pref_global'])) {
-    $teacher_id = (int)$_POST['teacher_id'];
-    $max_classes = (int)$_POST['max_classes_per_day'];
-    $preferred_days = isset($_POST['preferred_days']) ? implode(',', $_POST['preferred_days']) : null;
-    $pref_start = $_POST['preferred_time_start'] ?: null;
-    $pref_end = $_POST['preferred_time_end'] ?: null;
-    $priority_course_ids = $_POST['priority_course_ids'] ?: null;
-    $stmt = $conn->prepare("INSERT INTO teacher_preferences (teacher_id, max_classes_per_day, preferred_days, preferred_time_start, preferred_time_end, priority_course_ids) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE max_classes_per_day=?, preferred_days=?, preferred_time_start=?, preferred_time_end=?, priority_course_ids=?");
-    $stmt->bind_param("iissssissis", $teacher_id, $max_classes, $preferred_days, $pref_start, $pref_end, $priority_course_ids, $max_classes, $preferred_days, $pref_start, $pref_end, $priority_course_ids);
-    if ($stmt->execute()) $msg = "Global preferences saved.";
-    else $error = $stmt->error;
-    $stmt->close();
-}
-if (isset($_POST['save_course_priority'])) {
-    $teacher_id = (int)$_POST['teacher_id'];
-    $course_id = (int)$_POST['course_id'];
-    $priority = $_POST['priority'];
-    $stmt = $conn->prepare("INSERT INTO teacher_preferences (teacher_id, course_id, priority) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE priority = ?");
-    $stmt->bind_param("iiss", $teacher_id, $course_id, $priority, $priority);
-    if ($stmt->execute()) $msg = "Course priority saved.";
-    else $error = $stmt->error;
-    $stmt->close();
-}
-if (isset($_GET['del_pref_course'])) {
-    $id = (int)$_GET['del_pref_course'];
-    $conn->query("DELETE FROM teacher_preferences WHERE id=$id");
-    $msg = "Course preference removed.";
+if (isset($_GET['del_restriction'])) {
+    $id = (int)$_GET['del_restriction'];
+    $conn->query("DELETE FROM room_slot_restrictions WHERE id=$id");
+    $msg = "Deleted.";
 }
 
-// Teacher Availability
-if (isset($_POST['save_availability'])) {
-    $teacher_id = (int)$_POST['teacher_id'];
-    $conn->query("DELETE FROM teacher_availability WHERE teacher_id = $teacher_id");
-    foreach ($_POST['avail'] ?? [] as $day => $slots) {
-        if (!empty($slots['start']) && !empty($slots['end'])) {
-            $start_slot = (int)$slots['start']; $end_slot = (int)$slots['end'];
-            $conn->query("INSERT INTO teacher_availability (teacher_id, day, start_slot_id, end_slot_id) VALUES ($teacher_id, '$day', $start_slot, $end_slot)");
+// Delete Generation
+if (isset($_POST['delete_generation'])) {
+    $gen_id = (int)$_POST['generation_id'];
+    $conn->query("DELETE FROM routine_assignments WHERE generation_id = $gen_id");
+    $msg = "Generation $gen_id and all its routine assignments have been deleted.";
+}
+
+// Manual Routine Edit: Add/Update/Delete
+if (isset($_POST['manual_routine_action'])) {
+    $action = $_POST['manual_routine_action'];
+    if ($action == 'add') {
+        $batch_id = (int)$_POST['batch_id'];
+        $course_id = (int)$_POST['course_id'];
+        $teacher_id = (int)$_POST['teacher_id'];
+        $classroom_id = (int)$_POST['classroom_id'];
+        $day = $_POST['day'];
+        $timeslot_id = (int)$_POST['timeslot_id'];
+        $session_type = $_POST['session_type'];
+        $session_number = (int)$_POST['session_number'];
+        $gen_id = (int)$_POST['generation_id'];
+        $stmt = $conn->prepare("INSERT INTO routine_assignments (generation_id, batch_id, course_id, teacher_id, classroom_id, timeslot_id, day, session_type, session_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param("iiiiisssi", $gen_id, $batch_id, $course_id, $teacher_id, $classroom_id, $timeslot_id, $day, $session_type, $session_number);
+        if ($stmt->execute()) $msg = "Routine entry added.";
+        else $error = $stmt->error;
+        $stmt->close();
+    } elseif ($action == 'update') {
+        $id = (int)$_POST['assignment_id'];
+        $batch_id = (int)$_POST['batch_id'];
+        $course_id = (int)$_POST['course_id'];
+        $teacher_id = (int)$_POST['teacher_id'];
+        $classroom_id = (int)$_POST['classroom_id'];
+        $day = $_POST['day'];
+        $timeslot_id = (int)$_POST['timeslot_id'];
+        $session_type = $_POST['session_type'];
+        $session_number = (int)$_POST['session_number'];
+        $stmt = $conn->prepare("UPDATE routine_assignments SET batch_id=?, course_id=?, teacher_id=?, classroom_id=?, timeslot_id=?, day=?, session_type=?, session_number=? WHERE id=?");
+        $stmt->bind_param("iiiiissii", $batch_id, $course_id, $teacher_id, $classroom_id, $timeslot_id, $day, $session_type, $session_number, $id);
+        if ($stmt->execute()) $msg = "Routine entry updated.";
+        else $error = $stmt->error;
+        $stmt->close();
+    } elseif ($action == 'delete') {
+        $id = (int)$_POST['assignment_id'];
+        $conn->query("DELETE FROM routine_assignments WHERE id=$id");
+        $msg = "Routine entry deleted.";
+    }
+}
+
+// -------------------- AJAX ENDPOINTS --------------------
+if (isset($_GET['ajax'])) {
+    header('Content-Type: application/json');
+    $ajax = $_GET['ajax'];
+    
+    // Get courses for a batch
+    if ($ajax == 'get_courses') {
+        $batch_id = (int)$_GET['batch_id'];
+        $courses = [];
+        $res = $conn->query("
+            SELECT c.id, c.code, c.title, c.weekly_classes, t.id as teacher_id, u.username as teacher_name
+            FROM batch_courses bc
+            JOIN courses c ON bc.course_id = c.id
+            JOIN teachers t ON bc.teacher_id = t.id
+            JOIN users u ON t.user_id = u.id
+            WHERE bc.batch_id = $batch_id
+            ORDER BY c.code
+        ");
+        while($row = $res->fetch_assoc()) $courses[] = $row;
+        echo json_encode(['courses' => $courses]);
+        exit;
+    }
+    
+    // Get timeslots for a category and day (respecting batch type)
+    if ($ajax == 'get_timeslots') {
+        $category = $_GET['category']; // 'day' or 'evening'
+        $day = $_GET['day'];
+        $batch_type = $_GET['batch_type'];
+        $sql = "SELECT id, start_time, end_time FROM timeslots WHERE category = '$category' ORDER BY start_time";
+        $res = $conn->query($sql);
+        $timeslots = [];
+        while($row = $res->fetch_assoc()) {
+            if ($batch_type == 'Evening') {
+                if ($day == 'Friday') {
+                    if ($row['id'] == 14) continue; // exclude 3h slot on Friday
+                } else {
+                    if ($row['id'] != 14) continue; // only 3h slot on Sat-Thu
+                }
+            }
+            $timeslots[] = [
+                'id' => $row['id'],
+                'start_time_formatted' => date('h:i A', strtotime($row['start_time'])),
+                'end_time_formatted' => date('h:i A', strtotime($row['end_time']))
+            ];
         }
+        echo json_encode(['timeslots' => $timeslots]);
+        exit;
     }
-    $msg = "Availability updated.";
+    
+    // Get free rooms for a given (day, timeslot, batch, course)
+    if ($ajax == 'free_rooms') {
+        $batch_id = (int)$_GET['batch_id'];
+        $course_id = (int)$_GET['course_id'];
+        $day = $_GET['day'];
+        $timeslot_id = (int)$_GET['timeslot_id'];
+        $generation_id = (int)$_GET['generation_id'];
+        
+        $batch = $conn->query("SELECT type, off_day1, off_day2, size FROM batches WHERE id = $batch_id")->fetch_assoc();
+        if (!$batch) exit(json_encode(['error' => 'Invalid batch']));
+        $course = $conn->query("SELECT weekly_classes FROM courses WHERE id = $course_id")->fetch_assoc();
+        $session_type = ($course['weekly_classes'] == 1) ? 'lab' : 'theory';
+        
+        // Rooms not restricted for CSE (dept_id=1) on this day & timeslot
+        $restricted = [];
+        $restrictRes = $conn->query("SELECT room_id FROM room_slot_restrictions WHERE is_blocked = 1 AND department_id = 1 AND day = '$day' AND timeslot_id = $timeslot_id");
+        while($row = $restrictRes->fetch_assoc()) $restricted[] = $row['room_id'];
+        $restricted_in = empty($restricted) ? '' : 'AND id NOT IN (' . implode(',', $restricted) . ')';
+        
+        // Rooms already allocated in this generation
+        $allocated = [];
+        $allocRes = $conn->query("SELECT classroom_id FROM routine_assignments WHERE generation_id = $generation_id AND day = '$day' AND timeslot_id = $timeslot_id");
+        while($row = $allocRes->fetch_assoc()) $allocated[] = $row['classroom_id'];
+        $allocated_in = empty($allocated) ? '' : 'AND id NOT IN (' . implode(',', $allocated) . ')';
+        
+        $room_type_condition = ($session_type == 'lab') ? "type = 'lab'" : "type IN ('theory','both')";
+        $rooms = $conn->query("
+            SELECT id, room_name, capacity 
+            FROM classrooms 
+            WHERE capacity >= {$batch['size']}
+              AND $room_type_condition
+              $restricted_in
+              $allocated_in
+            ORDER BY room_name
+        ");
+        $free_rooms = [];
+        while($r = $rooms->fetch_assoc()) $free_rooms[] = $r;
+        echo json_encode(['free_rooms' => $free_rooms]);
+        exit;
+    }
+    
+    // Get latest generation ID
+    if ($ajax == 'get_latest_gen') {
+        $gen = $conn->query("SELECT MAX(generation_id) as gen FROM routine_assignments")->fetch_assoc()['gen'];
+        echo json_encode(['gen' => $gen ?: 1]);
+        exit;
+    }
 }
 
-// CSV Imports (all tables)
+// -------------------- CSV IMPORTS --------------------
 $import_msg = ''; $import_error = '';
-foreach (['depts','batches','courses','teachers','classrooms','timeslots','batch_courses','teacher_courses'] as $type) {
+foreach (['depts','batches','courses','teachers','classrooms','timeslots','batch_courses','room_slots'] as $type) {
     $post_key = 'import_'.$type; $file_key = $type.'_csv';
     if (isset($_POST[$post_key]) && isset($_FILES[$file_key]) && $_FILES[$file_key]['error'] == 0) {
         $rows = parseCSV($_FILES[$file_key], true);
@@ -265,7 +470,8 @@ foreach (['depts','batches','courses','teachers','classrooms','timeslots','batch
                     break;
                 case 'classrooms':
                     foreach ($rows as $r) { if (count($r)<6) { $failed++; continue; }
-                        $room=trim($r[0]); $cap=(int)$r[1]; $type=trim($r[2]); $dept_code=isset($r[3])&&trim($r[3])?trim($r[3]):null; $proj=(int)$r[4]; $ac=(int)$r[5];
+                        $room=trim($r[0]); $cap=(int)$r[1]; $type=trim($r[2]); $dept_code=isset($r[3])&&trim($r[3])?trim($r[3]):null; $proj=1; $ac=1;
+                        if (preg_match('/[Ll]$/', $room)) $type = 'lab';
                         $dept_id=null; if($dept_code){ $d=$conn->query("SELECT id FROM departments WHERE code='$dept_code'")->fetch_assoc(); if($d) $dept_id=$d['id']; }
                         $stmt=$conn->prepare("INSERT INTO classrooms (room_name,capacity,department_id,has_projector,has_ac,type) VALUES (?,?,?,?,?,?)"); $stmt->bind_param("siiiss",$room,$cap,$dept_id,$proj,$ac,$type); if($stmt->execute()) $success++; else $failed++; $stmt->close(); }
                     break;
@@ -274,18 +480,37 @@ foreach (['depts','batches','courses','teachers','classrooms','timeslots','batch
                         $start=trim($r[0]); $end=trim($r[1]); $stmt=$conn->prepare("INSERT INTO timeslots (start_time,end_time) VALUES (?,?)"); $stmt->bind_param("ss",$start,$end); if($stmt->execute()) $success++; else $failed++; $stmt->close(); }
                     break;
                 case 'batch_courses':
-                    foreach ($rows as $r) { if (count($r)<5) { $failed++; continue; }
-                        $dept_code=trim($r[0]); $sem=trim($r[1]); $sec=trim($r[2]); $type=trim($r[3]); $course_code=trim($r[4]);
+                    foreach ($rows as $r) { if (count($r)<6) { $failed++; continue; }
+                        $dept_code=trim($r[0]); $sem=trim($r[1]); $sec=trim($r[2]); $type=trim($r[3]); $course_code=trim($r[4]); $teacher_id_str=trim($r[5]);
                         $batch=$conn->query("SELECT b.id FROM batches b JOIN departments d ON b.department_id=d.id WHERE d.code='$dept_code' AND b.semester='$sem' AND b.section='$sec' AND b.type='$type'")->fetch_assoc();
                         $course=$conn->query("SELECT id FROM courses WHERE code='$course_code'")->fetch_assoc();
-                        if($batch && $course){ $stmt=$conn->prepare("INSERT IGNORE INTO batch_courses (batch_id,course_id) VALUES (?,?)"); $stmt->bind_param("ii",$batch['id'],$course['id']); if($stmt->execute()) $success++; else $failed++; $stmt->close(); } else $failed++; }
-                    break;
-                case 'teacher_courses':
-                    foreach ($rows as $r) { if (count($r)<2) { $failed++; continue; }
-                        $teacher_id_str=trim($r[0]); $course_code=trim($r[1]);
                         $teacher=$conn->query("SELECT id FROM teachers WHERE teacher_id='$teacher_id_str'")->fetch_assoc();
-                        $course=$conn->query("SELECT id FROM courses WHERE code='$course_code'")->fetch_assoc();
-                        if($teacher && $course){ $stmt=$conn->prepare("INSERT IGNORE INTO teacher_courses (teacher_id,course_id) VALUES (?,?)"); $stmt->bind_param("ii",$teacher['id'],$course['id']); if($stmt->execute()) $success++; else $failed++; $stmt->close(); } else $failed++; }
+                        if($batch && $course && $teacher){
+                            $stmt=$conn->prepare("INSERT INTO batch_courses (batch_id,course_id,teacher_id) VALUES (?,?,?) ON DUPLICATE KEY UPDATE teacher_id = VALUES(teacher_id)");
+                            $stmt->bind_param("iii", $batch['id'], $course['id'], $teacher['id']);
+                            if($stmt->execute()) $success++; else $failed++;
+                            $stmt->close();
+                        } else $failed++; }
+                    break;
+                case 'room_slots':
+                    foreach ($rows as $r) { if (count($r)<4) { $failed++; continue; }
+                        $day = trim($r[0]); $start_time = trim($r[1]); $end_time = trim($r[2]); $room_name = trim($r[3]); $dept_code = isset($r[4]) ? trim($r[4]) : null;
+                        $ts = $conn->query("SELECT id FROM timeslots WHERE start_time = '$start_time' AND end_time = '$end_time'")->fetch_assoc();
+                        if (!$ts) { $failed++; continue; }
+                        $timeslot_id = $ts['id'];
+                        $room = $conn->query("SELECT id FROM classrooms WHERE room_name = '$room_name'")->fetch_assoc();
+                        if (!$room) { $failed++; continue; }
+                        $room_id = $room['id'];
+                        $dept_id = null;
+                        if ($dept_code) {
+                            $dept = $conn->query("SELECT id FROM departments WHERE code = '$dept_code'")->fetch_assoc();
+                            if ($dept) $dept_id = $dept['id'];
+                        }
+                        $stmt = $conn->prepare("INSERT IGNORE INTO room_slot_restrictions (room_id, day, timeslot_id, department_id, is_blocked) VALUES (?, ?, ?, ?, 1)");
+                        $stmt->bind_param("isii", $room_id, $day, $timeslot_id, $dept_id);
+                        if ($stmt->execute()) $success++; else $failed++;
+                        $stmt->close();
+                    }
                     break;
             }
             $conn->commit();
@@ -301,13 +526,18 @@ $courses = $conn->query("SELECT c.*, d.name as dept_name FROM courses c JOIN dep
 $teachers = $conn->query("SELECT t.*, u.username FROM teachers t JOIN users u ON t.user_id = u.id");
 $timeslots = $conn->query("SELECT * FROM timeslots ORDER BY start_time");
 $classrooms = $conn->query("SELECT c.*, d.name as dept_name FROM classrooms c LEFT JOIN departments d ON c.department_id = d.id ORDER BY c.room_name");
-$batch_courses = $conn->query("SELECT bc.id, b.semester, b.section, b.type, c.code, c.title, d.name as dept_name FROM batch_courses bc JOIN batches b ON bc.batch_id = b.id JOIN courses c ON bc.course_id = c.id JOIN departments d ON b.department_id = d.id");
-$teacher_courses = $conn->query("SELECT tc.id, t.teacher_id, u.username as teacher_name, c.code, c.title FROM teacher_courses tc JOIN teachers t ON tc.teacher_id = t.id JOIN users u ON t.user_id = u.id JOIN courses c ON tc.course_id = c.id");
+$batch_courses = $conn->query("
+    SELECT bc.id, b.semester, b.section, b.type, c.code, c.title, d.name as dept_name,
+           t.teacher_id as assigned_teacher_id, u.username as teacher_name
+    FROM batch_courses bc
+    JOIN batches b ON bc.batch_id = b.id
+    JOIN courses c ON bc.course_id = c.id
+    JOIN departments d ON b.department_id = d.id
+    JOIN teachers t ON bc.teacher_id = t.id
+    JOIN users u ON t.user_id = u.id
+");
 $users = $conn->query("SELECT id, username, role FROM users WHERE role IN ('admin','teacher') ORDER BY username");
-$days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
-$timeslot_list = [];
-$ts_res = $conn->query("SELECT * FROM timeslots ORDER BY start_time");
-while ($ts = $ts_res->fetch_assoc()) $timeslot_list[] = $ts;
+$days = ['Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
 // Stats
 $totalDepts = $depts->num_rows;
@@ -318,6 +548,8 @@ $totalTimeslots = $timeslots->num_rows;
 $totalClassrooms = $classrooms->num_rows;
 $totalRoutineAssignments = $conn->query("SELECT COUNT(*) FROM routine_assignments")->fetch_row()[0];
 $lastGenId = $conn->query("SELECT MAX(generation_id) as last FROM routine_assignments")->fetch_assoc()['last'];
+$generations = $conn->query("SELECT DISTINCT generation_id FROM routine_assignments ORDER BY generation_id DESC");
+$genCount = $generations->num_rows;
 
 $deptCourseCounts = []; $deptNames = [];
 $deptCoursesRes = $conn->query("SELECT d.name, COUNT(c.id) as count FROM departments d LEFT JOIN courses c ON d.id = c.department_id GROUP BY d.id");
@@ -325,21 +557,38 @@ while($row = $deptCoursesRes->fetch_assoc()) { $deptNames[] = $row['name']; $dep
 $dayBatches = $conn->query("SELECT COUNT(*) FROM batches WHERE type='Day'")->fetch_row()[0];
 $eveningBatches = $conn->query("SELECT COUNT(*) FROM batches WHERE type='Evening'")->fetch_row()[0];
 
-// Teacher Preferences & Availability
-$pref_teachers = $conn->query("SELECT t.id, u.username FROM teachers t JOIN users u ON t.user_id = u.id");
-$selected_pref_teacher = isset($_GET['pref_teacher']) ? (int)$_GET['pref_teacher'] : 0;
-$teacher_global_pref = null; $teacher_course_prefs = [];
-if ($selected_pref_teacher) {
-    $g = $conn->query("SELECT * FROM teacher_preferences WHERE teacher_id = $selected_pref_teacher AND course_id IS NULL")->fetch_assoc();
-    if($g) $teacher_global_pref = $g;
-    $cp = $conn->query("SELECT tp.*, c.code, c.title FROM teacher_preferences tp JOIN courses c ON tp.course_id = c.id WHERE tp.teacher_id = $selected_pref_teacher AND tp.course_id IS NOT NULL");
-    while($p = $cp->fetch_assoc()) $teacher_course_prefs[] = $p;
-}
-$teacher_avail = [];
-if ($selected_pref_teacher) {
-    $av = $conn->query("SELECT * FROM teacher_availability WHERE teacher_id = $selected_pref_teacher");
-    while($a = $av->fetch_assoc()) $teacher_avail[$a['day']] = ['start'=>$a['start_slot_id'], 'end'=>$a['end_slot_id']];
-}
+// Conflict data for dashboard
+$teacherOverload = [];
+$teacherOverloadRes = $conn->query("
+    SELECT t.id, t.teacher_id, u.username, ra.day, COUNT(*) as cnt, t.max_classes_per_day
+    FROM routine_assignments ra
+    JOIN teachers t ON ra.teacher_id = t.id
+    JOIN users u ON t.user_id = u.id
+    GROUP BY ra.teacher_id, ra.day
+    HAVING cnt > t.max_classes_per_day
+");
+while($row = $teacherOverloadRes->fetch_assoc()) $teacherOverload[] = $row;
+
+$roomDoubleBookings = [];
+$roomDoubleRes = $conn->query("
+    SELECT ra.day, ra.timeslot_id, ra.classroom_id, cr.room_name, COUNT(*) as cnt
+    FROM routine_assignments ra
+    JOIN classrooms cr ON ra.classroom_id = cr.id
+    GROUP BY ra.day, ra.timeslot_id, ra.classroom_id
+    HAVING cnt > 1
+");
+while($row = $roomDoubleRes->fetch_assoc()) $roomDoubleBookings[] = $row;
+
+$teacherClashes = [];
+$teacherClashRes = $conn->query("
+    SELECT ra.day, ra.timeslot_id, ra.teacher_id, u.username, COUNT(*) as cnt
+    FROM routine_assignments ra
+    JOIN teachers t ON ra.teacher_id = t.id
+    JOIN users u ON t.user_id = u.id
+    GROUP BY ra.day, ra.timeslot_id, ra.teacher_id
+    HAVING cnt > 1
+");
+while($row = $teacherClashRes->fetch_assoc()) $teacherClashes[] = $row;
 
 $section = $_GET['section'] ?? 'dashboard';
 ?>
@@ -398,7 +647,10 @@ $section = $_GET['section'] ?? 'dashboard';
         .modal-content { background: rgba(255,255,255,0.95); backdrop-filter: blur(10px); }
         body.dark .modal-content { background: #1e293b; color:white; }
         .csv-card { border-left: 4px solid #0071e3; margin-bottom: 15px; }
-        .form-check-label { margin-left: 5px; }
+        .conflict-list { max-height: 200px; overflow-y: auto; }
+        .status-scheduled { color: green; font-weight: bold; }
+        .status-missing { color: red; font-weight: bold; }
+        .room-free { background: #d4edda; }
     </style>
 </head>
 <body>
@@ -419,14 +671,16 @@ $section = $_GET['section'] ?? 'dashboard';
             <li class="<?= ($section=='batches')?'active':'' ?>"><a href="?section=batches"><i class="fas fa-users"></i> Batches</a></li>
             <li class="<?= ($section=='courses')?'active':'' ?>"><a href="?section=courses"><i class="fas fa-book"></i> Courses</a></li>
             <li class="<?= ($section=='teachers')?'active':'' ?>"><a href="?section=teachers"><i class="fas fa-chalkboard-user"></i> Teachers</a></li>
-            <li class="<?= ($section=='preferences')?'active':'' ?>"><a href="?section=preferences"><i class="fas fa-sliders-h"></i> Teacher Preferences</a></li>
-            <li class="<?= ($section=='availability')?'active':'' ?>"><a href="?section=availability"><i class="fas fa-clock"></i> Teacher Availability</a></li>
             <li class="<?= ($section=='timeslots')?'active':'' ?>"><a href="?section=timeslots"><i class="fas fa-hourglass-half"></i> Time Slots</a></li>
             <li class="<?= ($section=='classrooms')?'active':'' ?>"><a href="?section=classrooms"><i class="fas fa-door-open"></i> Classrooms</a></li>
-            <li class="<?= ($section=='assignments')?'active':'' ?>"><a href="?section=assignments"><i class="fas fa-link"></i> Assignments</a></li>
+            <li class="<?= ($section=='room_slots')?'active':'' ?>"><a href="?section=room_slots"><i class="fas fa-calendar-times"></i> Room Slot Restrictions</a></li>
+            <li class="<?= ($section=='assignments')?'active':'' ?>"><a href="?section=assignments"><i class="fas fa-link"></i> Batch → Course</a></li>
+            <li class="<?= ($section=='routine_status')?'active':'' ?>"><a href="?section=routine_status"><i class="fas fa-check-circle"></i> Routine Status</a></li>
+            <li class="<?= ($section=='teacher_routine')?'active':'' ?>"><a href="?section=teacher_routine"><i class="fas fa-chalkboard-teacher"></i> Teacher Routine</a></li>
+            <li class="<?= ($section=='room_allocation')?'active':'' ?>"><a href="?section=room_allocation"><i class="fas fa-door-open"></i> Room Allocation</a></li>
+            <li class="<?= ($section=='manual_edit')?'active':'' ?>"><a href="?section=manual_edit"><i class="fas fa-edit"></i> Manual Routine Edit</a></li>
             <li class="<?= ($section=='csv_import')?'active':'' ?>"><a href="?section=csv_import"><i class="fas fa-upload"></i> CSV Import</a></li>
             <li class="<?= ($section=='routine')?'active':'' ?>"><a href="?section=routine"><i class="fas fa-calendar-week"></i> View Routine</a></li>
-            <li class="<?= ($section=='conflicts')?'active':'' ?>"><a href="?section=conflicts"><i class="fas fa-exclamation-triangle"></i> Conflicts</a></li>
             <hr class="bg-secondary my-2">
             <li><a href="modules/routine/generate.php" onclick="return confirm('Generate new routine?')"><i class="fas fa-sync-alt"></i> Generate Routine</a></li>
         </ul>
@@ -447,14 +701,70 @@ $section = $_GET['section'] ?? 'dashboard';
             <div class="stat-card"><h4>Time Slots</h4><h2><?= $totalTimeslots ?></h2></div>
             <div class="stat-card"><h4>Classrooms</h4><h2><?= $totalClassrooms ?></h2></div>
             <div class="stat-card"><h4>Routine Classes</h4><h2><?= $totalRoutineAssignments ?></h2></div>
-            <div class="stat-card"><h4>Last Gen</h4><h2><?= $lastGenId ?: 'None' ?></h2></div>
+            <div class="stat-card"><h4>Generations</h4><h2><?= $genCount ?></h2></div>
         </div>
         <div class="row">
             <div class="col-md-6"><div class="section-card"><div class="section-title"><i class="fas fa-chart-bar"></i> Courses per Department</div><canvas id="deptCoursesChart" style="max-height:300px;"></canvas></div></div>
             <div class="col-md-6"><div class="section-card"><div class="section-title"><i class="fas fa-chart-pie"></i> Batch Type Distribution</div><canvas id="batchTypeChart" style="max-height:300px;"></canvas></div></div>
         </div>
+        
+        <!-- Delete Generation -->
+        <div class="section-card">
+            <div class="section-title"><i class="fas fa-trash-alt"></i> Delete Routine Generation</div>
+            <form method="POST" class="row g-2">
+                <div class="col-auto">
+                    <select name="generation_id" class="form-select" required>
+                        <option value="">Select Generation ID</option>
+                        <?php $genRes = $conn->query("SELECT DISTINCT generation_id FROM routine_assignments ORDER BY generation_id DESC"); while($g = $genRes->fetch_assoc()): ?>
+                        <option value="<?= $g['generation_id'] ?>">Generation <?= $g['generation_id'] ?> (<?= $conn->query("SELECT COUNT(*) FROM routine_assignments WHERE generation_id = ".$g['generation_id'])->fetch_row()[0] ?> classes)</option>
+                        <?php endwhile; ?>
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <button type="submit" name="delete_generation" class="btn btn-danger" onclick="return confirm('WARNING: This will delete ALL routine assignments for this generation. Continue?')">Delete Generation</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Conflicts Summary -->
+        <div class="section-card">
+            <div class="section-title"><i class="fas fa-exclamation-triangle"></i> Current Conflicts (Latest Generation)</div>
+            <div class="row">
+                <div class="col-md-4">
+                    <h5>Teacher Overload</h5>
+                    <?php if(count($teacherOverload) > 0): ?>
+                    <ul class="conflict-list">
+                        <?php foreach($teacherOverload as $c): ?>
+                        <li><?= htmlspecialchars($c['username']) ?> (<?= $c['teacher_id'] ?>) has <?= $c['cnt'] ?> classes on <?= $c['day'] ?> (max <?= $c['max_classes_per_day'] ?>)</li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php else: echo "<p class='text-success'>No teacher overload.</p>"; endif; ?>
+                </div>
+                <div class="col-md-4">
+                    <h5>Room Double‑Booking</h5>
+                    <?php if(count($roomDoubleBookings) > 0): ?>
+                    <ul class="conflict-list">
+                        <?php foreach($roomDoubleBookings as $c): ?>
+                        <li><?= $c['room_name'] ?> on <?= $c['day'] ?> (slot <?= $c['timeslot_id'] ?>) has <?= $c['cnt'] ?> classes</li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php else: echo "<p class='text-success'>No room conflicts.</p>"; endif; ?>
+                </div>
+                <div class="col-md-4">
+                    <h5>Teacher Clashes</h5>
+                    <?php if(count($teacherClashes) > 0): ?>
+                    <ul class="conflict-list">
+                        <?php foreach($teacherClashes as $c): ?>
+                        <li><?= htmlspecialchars($c['username']) ?> on <?= $c['day'] ?> (slot <?= $c['timeslot_id'] ?>) has <?= $c['cnt'] ?> classes</li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php else: echo "<p class='text-success'>No teacher clashes.</p>"; endif; ?>
+                </div>
+            </div>
+        </div>
+
         <div class="section-card"><div class="section-title"><i class="fas fa-rocket"></i> Quick Actions</div>
-        <div><a href="?section=routine" class="btn">View Routine</a> <a href="modules/routine/generate.php" class="btn btn-warning">Generate Routine</a> <a href="?section=assignments" class="btn btn-outline">Assign Courses</a> <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createUserModal">+ New User</button></div></div>
+        <div><a href="?section=routine" class="btn">View Routine</a> <a href="modules/routine/generate.php" class="btn btn-warning">Generate Routine</a> <a href="modules/routine/view.php" class="btn btn-warning">View</a><a href="?section=assignments" class="btn btn-outline">Assign Batch Courses</a> <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createUserModal">+ New User</button></div></div>
         <script> new Chart(document.getElementById('deptCoursesChart'),{type:'bar',data:{labels:<?= json_encode($deptNames) ?>,datasets:[{label:'Number of Courses',data:<?= json_encode($deptCourseCounts) ?>,backgroundColor:'#0071e3'}]}}); new Chart(document.getElementById('batchTypeChart'),{type:'pie',data:{labels:['Day Batches','Evening Batches'],datasets:[{data:[<?= $dayBatches ?>,<?= $eveningBatches ?>],backgroundColor:['#0071e3','#ffc107']}]}}); </script>
         <?php endif; ?>
 
@@ -464,30 +774,18 @@ $section = $_GET['section'] ?? 'dashboard';
         <table class="table"><thead><tr><th>ID</th><th>Name</th><th>Code</th><th>Actions</th></tr></thead><tbody>
         <?php $depts->data_seek(0); while($d=$depts->fetch_assoc()): ?>
         <tr><td><?= $d['id'] ?></td><td><?= htmlspecialchars($d['name']) ?></td><td><?= $d['code'] ?></td>
-        <td><button class="btn btn-sm btn-warning" onclick="editDept(<?= $d['id'] ?>,'<?= addslashes($d['name']) ?>','<?= $d['code'] ?>')">Edit</button> <a href="?section=departments&del_dept=<?= $d['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</a></td></tr>
-        <?php endwhile; ?>
-        </tbody></table></div>
+        <td><button class="btn btn-sm btn-warning" onclick="editDept(<?= $d['id'] ?>,'<?= addslashes($d['name']) ?>','<?= $d['code'] ?>')">Edit</button> <a href="?section=departments&del_dept=<?= $d['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</a></td>
+        <?php endwhile; ?></tbody></table></div>
         <?php endif; ?>
 
-        <!-- BATCHES (SYNTAX FIXED) -->
+        <!-- BATCHES -->
         <?php if($section == 'batches'): ?>
         <div class="section-card"><div class="d-flex justify-content-between"><h3>Batches</h3><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#batchModal" onclick="clearBatchForm()">+ Add</button></div>
         <table class="table"><thead><tr><th>Dept</th><th>Type</th><th>Sem</th><th>Sec</th><th>Size</th><th>Off Days</th><th>Actions</th></tr></thead><tbody>
-        <?php $batches->data_seek(0); while($b=$batches->fetch_assoc()): 
-            $off_days = "Friday";
-            if (!empty($b['off_day2'])) $off_days .= ", " . $b['off_day2'];
-        ?>
-        <tr>
-            <td><?= $b['dept_name'] ?></td>
-            <td><?= $b['type'] ?></td>
-            <td><?= $b['semester'] ?></td>
-            <td><?= $b['section'] ?></td>
-            <td><?= $b['size'] ?></td>
-            <td><?= $off_days ?></td>
-            <td><button class="btn btn-sm btn-warning" onclick="editBatch(<?= $b['id'] ?>,<?= $b['department_id'] ?>,'<?= $b['type'] ?>','<?= $b['semester'] ?>','<?= $b['section'] ?>',<?= $b['size'] ?>,'<?= $b['off_day2'] ?>')">Edit</button> <a href="?section=batches&del_batch=<?= $b['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</a></td>
-        </tr>
-        <?php endwhile; ?>
-        </tbody></table></div>
+        <?php $batches->data_seek(0); while($b=$batches->fetch_assoc()): $off_days = "Friday"; if (!empty($b['off_day2'])) $off_days .= ", " . $b['off_day2']; ?>
+        <tr><td><?= $b['dept_name'] ?></td><td><?= $b['type'] ?></td><td><?= $b['semester'] ?></td><td><?= $b['section'] ?></td><td><?= $b['size'] ?></td><td><?= $off_days ?></td>
+        <td><button class="btn btn-sm btn-warning" onclick="editBatch(<?= $b['id'] ?>,<?= $b['department_id'] ?>,'<?= $b['type'] ?>','<?= $b['semester'] ?>','<?= $b['section'] ?>',<?= $b['size'] ?>,'<?= $b['off_day2'] ?>')">Edit</button> <a href="?section=batches&del_batch=<?= $b['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</a></td>
+        <?php endwhile; ?></tbody></table></div>
         <?php endif; ?>
 
         <!-- COURSES -->
@@ -497,9 +795,7 @@ $section = $_GET['section'] ?? 'dashboard';
         <?php $courses->data_seek(0); while($c=$courses->fetch_assoc()): ?>
         <tr><td><?= $c['code'] ?></td><td><?= htmlspecialchars($c['title']) ?></td><td><?= $c['credit'] ?></td><td><?= $c['weekly_classes'] ?></td><td><?= $c['dept_name'] ?></td>
         <td><button class="btn btn-sm btn-warning" onclick="editCourse(<?= $c['id'] ?>,<?= $c['department_id'] ?>,'<?= addslashes($c['title']) ?>','<?= $c['code'] ?>',<?= $c['credit'] ?>,<?= $c['weekly_classes'] ?>)">Edit</button> <a href="?section=courses&del_course=<?= $c['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</a></td>
-        </tr>
-        <?php endwhile; ?>
-        </tbody></table></div>
+        <?php endwhile; ?></tbody></table></div>
         <?php endif; ?>
 
         <!-- TEACHERS -->
@@ -509,60 +805,7 @@ $section = $_GET['section'] ?? 'dashboard';
         <?php $teachers->data_seek(0); while($t=$teachers->fetch_assoc()): ?>
         <tr><td><?= $t['teacher_id'] ?></td><td><?= htmlspecialchars($t['username']) ?></td><td><?= $t['department'] ?></td><td><?= $t['designation'] ?></td><td><?= $t['max_classes_per_day'] ?></td>
         <td><button class="btn btn-sm btn-warning" onclick="editTeacher(<?= $t['id'] ?>,<?= $t['user_id'] ?>,'<?= $t['teacher_id'] ?>','<?= $t['department'] ?>','<?= $t['designation'] ?>',<?= $t['max_classes_per_day'] ?>,'<?= $t['available_days'] ?>')">Edit</button> <a href="?section=teachers&del_teacher=<?= $t['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</a></td>
-        </tr>
-        <?php endwhile; ?>
-        </tbody></table></div>
-        <?php endif; ?>
-
-        <!-- TEACHER PREFERENCES -->
-        <?php if($section == 'preferences'): ?>
-        <div class="section-card"><h3>Teacher Preferences</h3>
-        <form method="GET" class="mb-3"><input type="hidden" name="section" value="preferences"><select name="pref_teacher" class="form-select w-auto d-inline-block" onchange="this.form.submit()"><option value="">Select Teacher</option><?php $pref_teachers->data_seek(0); while($pt=$pref_teachers->fetch_assoc()): ?><option value="<?= $pt['id'] ?>" <?= $selected_pref_teacher==$pt['id']?'selected':'' ?>><?= htmlspecialchars($pt['username']) ?></option><?php endwhile; ?></select></form>
-        <?php if($selected_pref_teacher): ?>
-        <form method="POST" class="mb-4 p-3 border rounded">
-            <input type="hidden" name="teacher_id" value="<?= $selected_pref_teacher ?>">
-            <h5>Global Preferences</h5>
-            <div class="row mb-2"><div class="col-md-3"><label>Max Classes/Day</label><input type="number" name="max_classes_per_day" class="form-control" value="<?= $teacher_global_pref['max_classes_per_day'] ?? '' ?>"></div>
-            <div class="col-md-3"><label>Preferred Time Start</label><input type="time" name="preferred_time_start" class="form-control" value="<?= $teacher_global_pref['preferred_time_start'] ?? '' ?>"></div>
-            <div class="col-md-3"><label>Preferred Time End</label><input type="time" name="preferred_time_end" class="form-control" value="<?= $teacher_global_pref['preferred_time_end'] ?? '' ?>"></div></div>
-            <div class="mb-2"><label>Preferred Days</label><div class="d-flex flex-wrap"><?php foreach(['Sunday','Monday','Tuesday','Wednesday','Thursday'] as $d): $checked = ($teacher_global_pref && strpos($teacher_global_pref['preferred_days'], $d) !== false) ? 'checked' : ''; ?><div class="form-check me-3"><input class="form-check-input" type="checkbox" name="preferred_days[]" value="<?= $d ?>" <?= $checked ?>><label class="form-check-label"><?= $d ?></label></div><?php endforeach; ?></div></div>
-            <div class="mb-2"><label>Priority Course IDs (comma separated course ids, optional)</label><input type="text" name="priority_course_ids" class="form-control" placeholder="e.g., 101,102" value="<?= $teacher_global_pref['priority_course_ids'] ?? '' ?>"></div>
-            <button type="submit" name="save_pref_global" class="btn btn-primary">Save Global Preferences</button>
-        </form>
-        <hr>
-        <h5>Per-Course Priorities</h5>
-        <form method="POST" class="row g-2 mb-3"><input type="hidden" name="teacher_id" value="<?= $selected_pref_teacher ?>">
-            <div class="col-auto"><select name="course_id" class="form-select" required><option value="">Select Course</option><?php $all_c = $conn->query("SELECT id, code, title FROM courses ORDER BY code"); while($co=$all_c->fetch_assoc()): ?><option value="<?= $co['id'] ?>"><?= $co['code']." - ".$co['title'] ?></option><?php endwhile; ?></select></div>
-            <div class="col-auto"><select name="priority" class="form-select"><option>High</option><option>Medium</option><option>Low</option></select></div>
-            <div class="col-auto"><button type="submit" name="save_course_priority" class="btn btn-success">Set Priority</button></div>
-        </form>
-        <table class="table"><thead><tr><th>Course</th><th>Priority</th><th>Action</th></tr></thead><tbody>
-        <?php foreach($teacher_course_prefs as $p): ?>
-        <tr><td><?= $p['code']." - ".$p['title'] ?></td><td><?= $p['priority'] ?></td><td><a href="?section=preferences&pref_teacher=<?= $selected_pref_teacher ?>&del_pref_course=<?= $p['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Remove?')">Remove</a></td></tr>
-        <?php endforeach; ?>
-        </tbody></table>
-        <?php else: echo "<p>Select a teacher to manage preferences.</p>"; endif; ?>
-        </div>
-        <?php endif; ?>
-
-        <!-- TEACHER AVAILABILITY -->
-        <?php if($section == 'availability'): ?>
-        <div class="section-card"><h3>Teacher Availability (Time Slot Ranges)</h3>
-        <form method="GET" class="mb-3"><input type="hidden" name="section" value="availability"><select name="pref_teacher" class="form-select w-auto d-inline-block" onchange="this.form.submit()"><option value="">Select Teacher</option><?php $pref_teachers->data_seek(0); while($pt=$pref_teachers->fetch_assoc()): ?><option value="<?= $pt['id'] ?>" <?= $selected_pref_teacher==$pt['id']?'selected':'' ?>><?= htmlspecialchars($pt['username']) ?></option><?php endwhile; ?></select></form>
-        <?php if($selected_pref_teacher): ?>
-        <form method="POST"><input type="hidden" name="teacher_id" value="<?= $selected_pref_teacher ?>">
-            <table class="table"><thead><tr><th>Day</th><th>Start Slot</th><th>End Slot</th></tr></thead><tbody>
-            <?php foreach($days as $day): $av = $teacher_avail[$day] ?? ['start'=>'','end'=>'']; ?>
-            <tr><td><?= $day ?></td>
-            <td><select name="avail[<?= $day ?>][start]" class="form-select"><option value="">-- None --</option><?php foreach($timeslot_list as $ts): ?><option value="<?= $ts['id'] ?>" <?= ($av['start']==$ts['id'])?'selected':'' ?>><?= date('h:i A',strtotime($ts['start_time'])) ?> - <?= date('h:i A',strtotime($ts['end_time'])) ?></option><?php endforeach; ?></select></td>
-            <td><select name="avail[<?= $day ?>][end]" class="form-select"><option value="">-- None --</option><?php foreach($timeslot_list as $ts): ?><option value="<?= $ts['id'] ?>" <?= ($av['end']==$ts['id'])?'selected':'' ?>><?= date('h:i A',strtotime($ts['start_time'])) ?> - <?= date('h:i A',strtotime($ts['end_time'])) ?></option><?php endforeach; ?></select></td>
-            </tr>
-            <?php endforeach; ?>
-            </tbody></table>
-            <button type="submit" name="save_availability" class="btn btn-primary">Save Availability</button>
-        </form>
-        <?php else: echo "<p>Select a teacher to set availability.</p>"; endif; ?>
-        </div>
+        <?php endwhile; ?></tbody></tr></div>
         <?php endif; ?>
 
         <!-- TIME SLOTS -->
@@ -570,7 +813,8 @@ $section = $_GET['section'] ?? 'dashboard';
         <div class="section-card"><div class="d-flex justify-content-between"><h3>Time Slots</h3><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#timeslotModal" onclick="clearTimeslotForm()">+ Add</button></div>
         <table class="table"><thead><tr><th>ID</th><th>Start</th><th>End</th><th>Actions</th></tr></thead><tbody>
         <?php $timeslots->data_seek(0); while($ts=$timeslots->fetch_assoc()): ?>
-        <tr><td><?= $ts['id'] ?></td><td><?= $ts['start_time'] ?></td><td><?= $ts['end_time'] ?></td><td><button class="btn btn-sm btn-warning" onclick="editTimeslot(<?= $ts['id'] ?>,'<?= $ts['start_time'] ?>','<?= $ts['end_time'] ?>')">Edit</button> <a href="?section=timeslots&del_timeslot=<?= $ts['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</a></td></tr>
+        <tr><td><?= $ts['id'] ?></td><td><?= $ts['start_time'] ?></td><td><?= $ts['end_time'] ?></td>
+        <td><button class="btn btn-sm btn-warning" onclick="editTimeslot(<?= $ts['id'] ?>,'<?= $ts['start_time'] ?>','<?= $ts['end_time'] ?>')">Edit</button> <a href="?section=timeslots&del_timeslot=<?= $ts['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</a></td>
         <?php endwhile; ?>
         </tbody></table></div>
         <?php endif; ?>
@@ -582,130 +826,577 @@ $section = $_GET['section'] ?? 'dashboard';
         <?php $classrooms->data_seek(0); while($cr=$classrooms->fetch_assoc()): ?>
         <tr><td><?= $cr['room_name'] ?></td><td><?= $cr['capacity'] ?></td><td><?= $cr['type'] ?></td><td><?= $cr['dept_name']?:'Any' ?></td><td><?= $cr['has_projector']?'✓':'✗' ?></td><td><?= $cr['has_ac']?'✓':'✗' ?></td>
         <td><button class="btn btn-sm btn-warning" onclick="editClassroom(<?= $cr['id'] ?>,'<?= $cr['room_name'] ?>',<?= $cr['capacity'] ?>,<?= $cr['department_id']?:0 ?>,<?= $cr['has_projector'] ?>,<?= $cr['has_ac'] ?>,'<?= $cr['type'] ?>')">Edit</button> <a href="?section=classrooms&del_classroom=<?= $cr['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</a></td>
-        </tr>
         <?php endwhile; ?>
         </tbody></table></div>
         <?php endif; ?>
 
+        <!-- ROOM SLOT RESTRICTIONS -->
+        <?php if($section == 'room_slots'): ?>
+        <div class="section-card">
+            <div class="d-flex justify-content-between align-items-center mb-3"><h3>Room Slot Restrictions</h3><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#roomSlotModal" onclick="clearRoomSlotForm()">+ Add Restriction</button></div>
+            <form method="GET" class="row g-2 mb-3">
+                <input type="hidden" name="section" value="room_slots">
+                <div class="col-auto"><select name="filter_room" class="form-select"><option value="">All Rooms</option><?php $allRooms = $conn->query("SELECT id, room_name FROM classrooms ORDER BY room_name"); while($r=$allRooms->fetch_assoc()): ?><option value="<?= $r['id'] ?>" <?= (isset($_GET['filter_room']) && $_GET['filter_room']==$r['id'])?'selected':'' ?>><?= $r['room_name'] ?></option><?php endwhile; ?></select></div>
+                <div class="col-auto"><select name="filter_day" class="form-select"><option value="">All Days</option><?php foreach(['Saturday','Sunday','Monday','Tuesday','Wednesday','Thursday'] as $d): ?><option <?= (isset($_GET['filter_day']) && $_GET['filter_day']==$d)?'selected':'' ?>><?= $d ?></option><?php endforeach; ?></select></div>
+                <div class="col-auto"><button type="submit" class="btn btn-secondary">Filter</button></div>
+            </form>
+            <div class="table-responsive">
+                <table class="table table-sm">
+                    <thead><tr><th>Room</th><th>Day</th><th>Timeslot</th><th>Department</th><th>Action</th></tr></thead>
+                    <tbody>
+                    <?php
+                    $where = [];
+                    if (isset($_GET['filter_room']) && $_GET['filter_room']) $where[] = "rs.room_id = ".(int)$_GET['filter_room'];
+                    if (isset($_GET['filter_day']) && $_GET['filter_day']) $where[] = "rs.day = '".$conn->real_escape_string($_GET['filter_day'])."'";
+                    $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
+                    $restrictions = $conn->query("
+                        SELECT rs.*, cr.room_name, ts.start_time, ts.end_time, d.name as dept_name
+                        FROM room_slot_restrictions rs
+                        JOIN classrooms cr ON rs.room_id = cr.id
+                        JOIN timeslots ts ON rs.timeslot_id = ts.id
+                        LEFT JOIN departments d ON rs.department_id = d.id
+                        $whereClause
+                        ORDER BY cr.room_name, FIELD(rs.day,'Saturday','Sunday','Monday','Tuesday','Wednesday','Thursday'), ts.start_time
+                    ");
+                    while($rs = $restrictions->fetch_assoc()):
+                    ?>
+                    <tr><td><?= $rs['room_name'] ?></td><td><?= $rs['day'] ?></td><td><?= date('h:i A', strtotime($rs['start_time'])) ?> - <?= date('h:i A', strtotime($rs['end_time'])) ?></td><td><?= $rs['dept_name'] ?? 'All Departments' ?></td><td><a href="?section=room_slots&del_restriction=<?= $rs['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete this restriction?')">Remove</a></td></tr>
+                    <?php endwhile; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="modal fade" id="roomSlotModal" tabindex="-1"><div class="modal-dialog"><form method="POST" class="modal-content"><div class="modal-header"><h5>Room Slot Restriction</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><input type="hidden" name="room_slot_action" id="room_slot_action" value="create"><input type="hidden" name="restriction_id" id="restriction_id"><select name="room_id" id="restriction_room" class="form-select mb-2" required><option value="">Select Room</option><?php $rooms = $conn->query("SELECT id, room_name FROM classrooms ORDER BY room_name"); while($r=$rooms->fetch_assoc()): ?><option value="<?= $r['id'] ?>"><?= $r['room_name'] ?></option><?php endwhile; ?></select><select name="day" id="restriction_day" class="form-select mb-2" required><option value="">Select Day</option><option>Saturday</option><option>Sunday</option><option>Monday</option><option>Tuesday</option><option>Wednesday</option><option>Thursday</option></select><select name="timeslot_id" id="restriction_timeslot" class="form-select mb-2" required><option value="">Select Timeslot</option><?php $slots = $conn->query("SELECT id, start_time, end_time FROM timeslots ORDER BY start_time"); while($s=$slots->fetch_assoc()): ?><option value="<?= $s['id'] ?>"><?= date('h:i A', strtotime($s['start_time'])) ?> - <?= date('h:i A', strtotime($s['end_time'])) ?></option><?php endwhile; ?></select><select name="department_id" id="restriction_dept" class="form-select mb-2"><option value="">All Departments (Global Block)</option><?php $depts->data_seek(0); while($d=$depts->fetch_assoc()): ?><option value="<?= $d['id'] ?>"><?= $d['name'] ?></option><?php endwhile; ?></select></div><div class="modal-footer"><button type="submit" name="save_room_slot" class="btn btn-primary">Save</button></div></form></div></div>
+        <script>function clearRoomSlotForm() { document.getElementById('room_slot_action').value = 'create'; document.getElementById('restriction_id').value = ''; document.getElementById('restriction_room').value = ''; document.getElementById('restriction_day').value = ''; document.getElementById('restriction_timeslot').value = ''; document.getElementById('restriction_dept').value = ''; }</script>
+        <?php endif; ?>
+
         <!-- ASSIGNMENTS -->
         <?php if($section == 'assignments'): ?>
-        <div class="row g-3">
-            <div class="col-md-6"><div class="section-card"><h4>Batch → Courses</h4><button class="btn btn-sm btn-primary mb-2" data-bs-toggle="modal" data-bs-target="#assignBatchCourseModal">+ Assign</button><table class="table table-sm"><thead><tr><th>Batch</th><th>Course</th><th></th></tr></thead><tbody><?php $batch_courses->data_seek(0); while($bc=$batch_courses->fetch_assoc()): ?><tr><td><?= $bc['dept_name']." ".$bc['semester'].$bc['section']." (".$bc['type'].")" ?></td><td><?= $bc['code']." - ".$bc['title'] ?></td><td><a href="?section=assignments&remove_bc=<?= $bc['id'] ?>" class="btn btn-sm btn-danger">Remove</a></td></tr><?php endwhile; ?></tbody></table></div></div>
-            <div class="col-md-6"><div class="section-card"><h4>Teacher → Courses</h4><button class="btn btn-sm btn-primary mb-2" data-bs-toggle="modal" data-bs-target="#assignTeacherCourseModal">+ Assign</button><table class="table table-sm"><thead><tr><th>Teacher</th><th>Course</th><th></th></tr></thead><tbody><?php $teacher_courses->data_seek(0); while($tc=$teacher_courses->fetch_assoc()): ?><tr><td><?= $tc['teacher_name']." (".$tc['teacher_id'].")" ?></td><td><?= $tc['code']." - ".$tc['title'] ?></td><td><a href="?section=assignments&remove_tc=<?= $tc['id'] ?>" class="btn btn-sm btn-danger">Remove</a></td></tr><?php endwhile; ?></tbody></table></div></div>
+        <div class="section-card">
+            <h4>Batch → Courses (teacher mandatory)</h4>
+            <button class="btn btn-sm btn-primary mb-2" data-bs-toggle="modal" data-bs-target="#assignBatchCourseModal">+ Assign</button>
+            <table class="table table-sm">
+                <thead><tr><th>Batch</th><th>Course</th><th>Assigned Teacher</th><th></th></tr></thead>
+                <tbody>
+                <?php $batch_courses->data_seek(0); while($bc=$batch_courses->fetch_assoc()): ?>
+                <tr><td><?= $bc['dept_name']." ".$bc['semester'].$bc['section']." (".$bc['type'].")" ?></td><td><?= $bc['code']." - ".$bc['title'] ?></td><td><?= $bc['teacher_name'] ?></td><td><a href="?section=assignments&remove_bc=<?= $bc['id'] ?>" class="btn btn-sm btn-danger">Remove</a></td></tr>
+                <?php endwhile; ?>
+                </tbody>
+            </table>
         </div>
+        <?php endif; ?>
+
+        <!-- ROUTINE STATUS -->
+        <?php if($section == 'routine_status'): ?>
+        <div class="section-card">
+            <h3>Course Assignment Status (Latest Generation)</h3>
+            <?php
+            $gen_id = $conn->query("SELECT MAX(generation_id) as gen FROM routine_assignments")->fetch_assoc()['gen'];
+            if(!$gen_id) echo "<p>No routine generated yet.</p>";
+            else {
+                $batchesAll = $conn->query("SELECT b.*, d.name as dept_name FROM batches b JOIN departments d ON b.department_id = d.id ORDER BY d.name, b.semester");
+                while($batch = $batchesAll->fetch_assoc()):
+                    $batch_courses = $conn->query("SELECT c.id, c.code, c.title, bc.teacher_id FROM batch_courses bc JOIN courses c ON bc.course_id = c.id WHERE bc.batch_id = {$batch['id']}");
+                    if($batch_courses->num_rows == 0) continue;
+                    echo "<h4>{$batch['dept_name']} - Sem {$batch['semester']}{$batch['section']} ({$batch['type']})</h4>";
+                    echo "<table class='table table-sm'><thead><tr><th>Course</th><th>Scheduled?</th><th>Teacher</th></tr></thead><tbody>";
+                    while($crs = $batch_courses->fetch_assoc()):
+                        $scheduled = $conn->query("SELECT COUNT(*) as cnt FROM routine_assignments WHERE batch_id={$batch['id']} AND course_id={$crs['id']} AND generation_id=$gen_id")->fetch_assoc()['cnt'];
+                        $status = ($scheduled > 0) ? "<span class='status-scheduled'>✓ Scheduled</span>" : "<span class='status-missing'>✗ Not scheduled</span>";
+                        $teacherName = $conn->query("SELECT u.username FROM teachers t JOIN users u ON t.user_id = u.id WHERE t.id = {$crs['teacher_id']}")->fetch_assoc()['username'] ?? 'Not assigned';
+                        echo "<tr><td>{$crs['code']} - {$crs['title']}</td><td>$status</td><td>$teacherName</td></tr>";
+                    endwhile;
+                    echo "</tbody></table><hr>";
+                endwhile;
+            }
+            ?>
+        </div>
+        <?php endif; ?>
+
+        <!-- TEACHER ROUTINE -->
+        <?php if($section == 'teacher_routine'): ?>
+        <div class="section-card">
+            <h3>Teacher Weekly Routine</h3>
+            <form method="GET" class="mb-3">
+                <input type="hidden" name="section" value="teacher_routine">
+                <select name="teacher_id" class="form-select w-auto d-inline-block" onchange="this.form.submit()">
+                    <option value="">-- Select Teacher --</option>
+                    <?php $teachersAll = $conn->query("SELECT t.id, u.username FROM teachers t JOIN users u ON t.user_id = u.id ORDER BY u.username"); while($tch = $teachersAll->fetch_assoc()): ?>
+                    <option value="<?= $tch['id'] ?>" <?= (isset($_GET['teacher_id']) && $_GET['teacher_id'] == $tch['id']) ? 'selected' : '' ?>><?= $tch['username'] ?></option>
+                    <?php endwhile; ?>
+                </select>
+            </form>
+            <?php if(isset($_GET['teacher_id']) && $_GET['teacher_id']): 
+                $teacher_id = (int)$_GET['teacher_id'];
+                $teacher = $conn->query("SELECT u.username FROM teachers t JOIN users u ON t.user_id = u.id WHERE t.id = $teacher_id")->fetch_assoc();
+                $gen_id = $conn->query("SELECT MAX(generation_id) as gen FROM routine_assignments")->fetch_assoc()['gen'];
+                if(!$gen_id) echo "<p>No routine generated.</p>";
+                else {
+                    $daysOfWeek = ['Saturday','Sunday','Monday','Tuesday','Wednesday','Thursday','Friday'];
+                    $timeslots = $conn->query("SELECT * FROM timeslots ORDER BY start_time")->fetch_all(MYSQLI_ASSOC);
+                    echo "<div class='table-responsive'><table class='table table-bordered'><thead><tr><th>Time</th>";
+                    foreach($daysOfWeek as $d) echo "<th>$d</th>";
+                    echo "</tr></thead><tbody>";
+                    foreach($timeslots as $slot):
+                        echo "<tr><td class='bg-light'>".date('h:i A', strtotime($slot['start_time']))." - ".date('h:i A', strtotime($slot['end_time']))."</td>";
+                        foreach($daysOfWeek as $day):
+                            echo "<td>";
+                            $res = $conn->query("
+                                SELECT c.code, cr.room_name, b.semester, b.section
+                                FROM routine_assignments ra
+                                JOIN courses c ON ra.course_id = c.id
+                                JOIN classrooms cr ON ra.classroom_id = cr.id
+                                JOIN batches b ON ra.batch_id = b.id
+                                WHERE ra.teacher_id = $teacher_id AND ra.day = '$day' AND ra.timeslot_id = {$slot['id']} AND ra.generation_id = $gen_id
+                            ");
+                            while($row = $res->fetch_assoc()):
+                                echo "<div><strong>{$row['code']}</strong><br><small>{$row['room_name']}<br>Batch: {$row['semester']}{$row['section']}</small></div>";
+                            endwhile;
+                            echo "</td>";
+                        endforeach;
+                        echo "</tr>";
+                    endforeach;
+                    echo "</tbody></table></div>";
+                }
+            endif; ?>
+        </div>
+        <?php endif; ?>
+
+        <!-- ROOM ALLOCATION (respecting restrictions) -->
+        <?php if($section == 'room_allocation'): ?>
+        <div class="section-card">
+            <h3>Room Availability for CSE Department (Respecting Restrictions)</h3>
+            <p class="text-muted">Shows only rooms that are <strong>not restricted</strong> for CSE in each day/timeslot. <span class="text-success">Allocated</span> rooms show the course; <span class="text-info">Free</span> rooms are available.</p>
+            <?php
+            $gen_id = $conn->query("SELECT MAX(generation_id) as gen FROM routine_assignments")->fetch_assoc()['gen'];
+            if(!$gen_id) {
+                echo "<p>No routine generated yet.</p>";
+            } else {
+                $allRooms = $conn->query("SELECT id, room_name FROM classrooms ORDER BY room_name")->fetch_all(MYSQLI_ASSOC);
+                $timeslots = $conn->query("SELECT * FROM timeslots ORDER BY start_time")->fetch_all(MYSQLI_ASSOC);
+                $daysOfWeek = ['Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+
+                $assignments = [];
+                $assignRes = $conn->query("
+                    SELECT ra.day, ra.timeslot_id, ra.classroom_id, c.code, u.username, b.semester, b.section
+                    FROM routine_assignments ra
+                    JOIN courses c ON ra.course_id = c.id
+                    JOIN teachers t ON ra.teacher_id = t.id
+                    JOIN users u ON t.user_id = u.id
+                    JOIN batches b ON ra.batch_id = b.id
+                    WHERE ra.generation_id = $gen_id
+                ");
+                while($row = $assignRes->fetch_assoc()) {
+                    $assignments[$row['day']][$row['timeslot_id']][$row['classroom_id']][] = $row['code'] . " (" . $row['username'] . "/" . $row['semester'].$row['section'] . ")";
+                }
+
+                $restricted = [];
+                $restrictRes = $conn->query("
+                    SELECT room_id, day, timeslot_id
+                    FROM room_slot_restrictions
+                    WHERE is_blocked = 1 AND department_id = 1
+                ");
+                while($row = $restrictRes->fetch_assoc()) {
+                    $restricted[$row['room_id']][$row['day']][$row['timeslot_id']] = true;
+                }
+
+                echo "<div class='table-responsive'><table class='table table-bordered table-sm'>";
+                echo "<thead class='table-dark'><tr><th>Time / Day</th>";
+                foreach($daysOfWeek as $day) echo "<th>$day</th>";
+                echo "</tr></thead><tbody>";
+                foreach($timeslots as $slot) {
+                    echo "<tr><td class='bg-light'>" . date('h:i A', strtotime($slot['start_time'])) . " - " . date('h:i A', strtotime($slot['end_time'])) . "</td>";
+                    foreach($daysOfWeek as $day) {
+                        $availableRooms = [];
+                        foreach($allRooms as $room) {
+                            if(!isset($restricted[$room['id']][$day][$slot['id']])) {
+                                $availableRooms[$room['id']] = $room['room_name'];
+                            }
+                        }
+                        $allocatedList = [];
+                        $freeList = [];
+                        foreach($availableRooms as $roomId => $roomName) {
+                            if(isset($assignments[$day][$slot['id']][$roomId])) {
+                                $courses = implode(", ", $assignments[$day][$slot['id']][$roomId]);
+                                $allocatedList[] = "$roomName [$courses]";
+                            } else {
+                                $freeList[] = $roomName;
+                            }
+                        }
+                        echo "<td style='vertical-align:top;'>";
+                        if(!empty($allocatedList)) echo "<div><i class='fas fa-check-circle text-success'></i> <strong>Allocated:</strong> " . implode(", ", $allocatedList) . "</div>";
+                        if(!empty($freeList)) echo "<div><i class='fas fa-door-open text-info'></i> <strong>Free:</strong> " . implode(", ", $freeList) . "</div>";
+                        if(empty($allocatedList) && empty($freeList)) echo "— <span class='text-muted'>No rooms available (all restricted)</span>";
+                        echo "</td>";
+                    }
+                    echo "</tr>";
+                }
+                echo "</tbody></table></div>";
+            }
+            ?>
+        </div>
+        <?php endif; ?>
+
+        <!-- MANUAL ROUTINE EDIT (dynamic) -->
+        <?php if($section == 'manual_edit'): ?>
+        <div class="section-card">
+            <h3>Manual Routine Edit (Add/Update/Delete)</h3>
+            <button class="btn btn-primary mb-3" data-bs-toggle="modal" data-bs-target="#manualRoutineModal" onclick="clearManualForm()">+ Add New Entry</button>
+            <div class="table-responsive">
+                <table class="table table-sm">
+                    <thead><tr><th>ID</th><th>Gen</th><th>Batch</th><th>Course</th><th>Teacher</th><th>Room</th><th>Day</th><th>Timeslot</th><th>Type</th><th>Actions</th></tr></thead>
+                    <tbody>
+                    <?php
+                    $manualAssignments = $conn->query("
+                        SELECT ra.*, b.semester, b.section, c.code as course_code, u.username as teacher_name, cr.room_name, ts.start_time, ts.end_time
+                        FROM routine_assignments ra
+                        JOIN batches b ON ra.batch_id = b.id
+                        JOIN courses c ON ra.course_id = c.id
+                        JOIN teachers t ON ra.teacher_id = t.id
+                        JOIN users u ON t.user_id = u.id
+                        JOIN classrooms cr ON ra.classroom_id = cr.id
+                        JOIN timeslots ts ON ra.timeslot_id = ts.id
+                        ORDER BY ra.generation_id DESC, ra.id DESC LIMIT 200
+                    ");
+                    while($ra = $manualAssignments->fetch_assoc()):
+                    ?>
+                    <tr>
+                        <td><?= $ra['id'] ?></td>
+                        <td><?= $ra['generation_id'] ?></td>
+                        <td><?= $ra['semester'].$ra['section'] ?></td>
+                        <td><?= $ra['course_code'] ?></td>
+                        <td><?= $ra['teacher_name'] ?></td>
+                        <td><?= $ra['room_name'] ?></td>
+                        <td><?= $ra['day'] ?></td>
+                        <td><?= date('h:i A', strtotime($ra['start_time'])) ?> - <?= date('h:i A', strtotime($ra['end_time'])) ?></td>
+                        <td><?= $ra['session_type'] ?></td>
+                        <td>
+                            <button class="btn btn-sm btn-warning" onclick="editManualRoutine(<?= htmlspecialchars(json_encode($ra)) ?>)">Edit</button>
+                            <form method="POST" style="display:inline-block;">
+                                <input type="hidden" name="manual_routine_action" value="delete">
+                                <input type="hidden" name="assignment_id" value="<?= $ra['id'] ?>">
+                                <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Delete this entry?')">Del</button>
+                            </form>
+                        </td>
+                    </tr>
+                    <?php endwhile; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Modal for Add/Edit -->
+        <div class="modal fade" id="manualRoutineModal" tabindex="-1">
+            <div class="modal-dialog modal-lg">
+                <form method="POST" class="modal-content" id="manualRoutineForm">
+                    <div class="modal-header"><h5>Routine Entry</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                    <div class="modal-body">
+                        <input type="hidden" name="manual_routine_action" id="manual_action" value="add">
+                        <input type="hidden" name="assignment_id" id="manual_id">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <label>Generation ID</label>
+                                <input type="number" name="generation_id" id="manual_gen" class="form-control mb-2" required>
+                                <label>Batch</label>
+                                <select name="batch_id" id="manual_batch" class="form-select mb-2" required>
+                                    <option value="">Select Batch</option>
+                                    <?php 
+                                    $batchesAll = $conn->query("SELECT b.*, d.name as dept_name FROM batches b JOIN departments d ON b.department_id = d.id ORDER BY d.name, b.semester"); 
+                                    while($b = $batchesAll->fetch_assoc()): ?>
+                                    <option value="<?= $b['id'] ?>" data-type="<?= $b['type'] ?>" data-off1="<?= $b['off_day1'] ?>" data-off2="<?= $b['off_day2'] ?>"><?= $b['dept_name']." - Sem ".$b['semester'].$b['section']." (".$b['type'].")" ?></option>
+                                    <?php endwhile; ?>
+                                </select>
+                                <label>Course</label>
+                                <select name="course_id" id="manual_course" class="form-select mb-2" required>
+                                    <option value="">Select Batch First</option>
+                                </select>
+                                <label>Teacher (auto-filled)</label>
+                                <input type="text" id="manual_teacher_name" class="form-control mb-2" readonly>
+                                <input type="hidden" name="teacher_id" id="manual_teacher_id">
+                            </div>
+                            <div class="col-md-6">
+                                <label>Day</label>
+                                <select name="day" id="manual_day" class="form-select mb-2" required>
+                                    <option value="">Select Day</option>
+                                </select>
+                                <label>Timeslot</label>
+                                <select name="timeslot_id" id="manual_timeslot" class="form-select mb-2" required>
+                                    <option value="">Select Timeslot</option>
+                                </select>
+                                <label>Available Rooms</label>
+                                <select name="classroom_id" id="manual_room" class="form-select mb-2" required disabled>
+                                    <option value="">Select a day and timeslot first</option>
+                                </select>
+                                <input type="hidden" name="session_type" id="manual_type" value="theory">
+                                <input type="hidden" name="session_number" id="manual_number" value="1">
+                            </div>
+                        </div>
+                        <div id="roomLoadMsg" class="text-info small"></div>
+                    </div>
+                    <div class="modal-footer"><button type="submit" class="btn btn-primary">Save</button></div>
+                </form>
+            </div>
+        </div>
+
+        <script>
+        let batchCourses = {};
+        let batchType = {};
+        let batchOffDays = {};
+
+        document.getElementById('manual_batch').addEventListener('change', function() {
+            const batchId = this.value;
+            const selectedOption = this.options[this.selectedIndex];
+            const batchTypeVal = selectedOption.getAttribute('data-type');
+            const off1 = selectedOption.getAttribute('data-off1');
+            const off2 = selectedOption.getAttribute('data-off2');
+            batchType[batchId] = batchTypeVal;
+            batchOffDays[batchId] = [off1, off2].filter(d => d);
+            
+            if (!batchId) {
+                document.getElementById('manual_course').innerHTML = '<option value="">Select Batch First</option>';
+                document.getElementById('manual_teacher_id').value = '';
+                document.getElementById('manual_teacher_name').value = '';
+                return;
+            }
+            
+            fetch(`?ajax=get_courses&batch_id=${batchId}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.courses) {
+                        batchCourses[batchId] = data.courses;
+                        let options = '<option value="">Select Course</option>';
+                        data.courses.forEach(c => {
+                            options += `<option value="${c.id}" data-teacher-id="${c.teacher_id}" data-teacher-name="${c.teacher_name}" data-weekly="${c.weekly_classes}">${c.code} - ${c.title}</option>`;
+                        });
+                        document.getElementById('manual_course').innerHTML = options;
+                    } else {
+                        document.getElementById('manual_course').innerHTML = '<option value="">No courses assigned</option>';
+                    }
+                });
+        });
+
+        document.getElementById('manual_course').addEventListener('change', function() {
+            const selected = this.options[this.selectedIndex];
+            const teacherId = selected.getAttribute('data-teacher-id');
+            const teacherName = selected.getAttribute('data-teacher-name');
+            const weekly = selected.getAttribute('data-weekly');
+            document.getElementById('manual_teacher_id').value = teacherId || '';
+            document.getElementById('manual_teacher_name').value = teacherName || '';
+            const sessionType = (weekly == 1) ? 'lab' : 'theory';
+            document.getElementById('manual_type').value = sessionType;
+            
+            document.getElementById('manual_day').innerHTML = '<option value="">Select Day</option>';
+            document.getElementById('manual_timeslot').innerHTML = '<option value="">Select Timeslot</option>';
+            document.getElementById('manual_room').innerHTML = '<option value="">Select a day and timeslot first</option>';
+            document.getElementById('manual_room').disabled = true;
+            
+            const batchId = document.getElementById('manual_batch').value;
+            if (batchId && batchOffDays[batchId]) {
+                const allDays = ['Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+                let workingDays = allDays.filter(day => !batchOffDays[batchId].includes(day));
+                if (batchType[batchId] === 'Evening' && !workingDays.includes('Friday')) {
+                    workingDays.push('Friday');
+                    workingDays.sort((a,b) => allDays.indexOf(a) - allDays.indexOf(b));
+                }
+                let dayOptions = '<option value="">Select Day</option>';
+                workingDays.forEach(day => { dayOptions += `<option value="${day}">${day}</option>`; });
+                document.getElementById('manual_day').innerHTML = dayOptions;
+            }
+        });
+
+        document.getElementById('manual_day').addEventListener('change', function() {
+            const day = this.value;
+            const batchId = document.getElementById('manual_batch').value;
+            if (!batchId || !day) return;
+            const batchTypeVal = batchType[batchId];
+            const category = (batchTypeVal === 'Evening') ? 'evening' : 'day';
+            fetch(`?ajax=get_timeslots&category=${category}&day=${day}&batch_type=${batchTypeVal}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.timeslots) {
+                        let options = '<option value="">Select Timeslot</option>';
+                        data.timeslots.forEach(ts => {
+                            options += `<option value="${ts.id}">${ts.start_time_formatted} - ${ts.end_time_formatted}</option>`;
+                        });
+                        document.getElementById('manual_timeslot').innerHTML = options;
+                        document.getElementById('manual_room').innerHTML = '<option value="">Select a timeslot first</option>';
+                        document.getElementById('manual_room').disabled = true;
+                    } else {
+                        document.getElementById('manual_timeslot').innerHTML = '<option value="">No timeslots available</option>';
+                    }
+                });
+        });
+
+        document.getElementById('manual_timeslot').addEventListener('change', function() {
+            const timeslotId = this.value;
+            const day = document.getElementById('manual_day').value;
+            const batchId = document.getElementById('manual_batch').value;
+            const courseId = document.getElementById('manual_course').value;
+            const genId = document.getElementById('manual_gen').value;
+            if (!timeslotId || !day || !batchId || !courseId || !genId) {
+                document.getElementById('manual_room').innerHTML = '<option value="">Missing required fields</option>';
+                document.getElementById('manual_room').disabled = true;
+                return;
+            }
+            document.getElementById('roomLoadMsg').innerHTML = 'Loading free rooms...';
+            fetch(`?ajax=free_rooms&batch_id=${batchId}&course_id=${courseId}&day=${day}&timeslot_id=${timeslotId}&generation_id=${genId}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        document.getElementById('roomLoadMsg').innerHTML = data.error;
+                        document.getElementById('manual_room').innerHTML = '<option value="">No free rooms</option>';
+                        document.getElementById('manual_room').disabled = true;
+                    } else if (data.free_rooms && data.free_rooms.length > 0) {
+                        let options = '<option value="">Select a free room</option>';
+                        data.free_rooms.forEach(room => {
+                            options += `<option value="${room.id}">${room.room_name} (Capacity: ${room.capacity})</option>`;
+                        });
+                        document.getElementById('manual_room').innerHTML = options;
+                        document.getElementById('manual_room').disabled = false;
+                        document.getElementById('roomLoadMsg').innerHTML = `${data.free_rooms.length} free room(s) available.`;
+                    } else {
+                        document.getElementById('manual_room').innerHTML = '<option value="">No free rooms available</option>';
+                        document.getElementById('manual_room').disabled = true;
+                        document.getElementById('roomLoadMsg').innerHTML = 'All rooms are either restricted or already allocated.';
+                    }
+                })
+                .catch(err => {
+                    document.getElementById('roomLoadMsg').innerHTML = 'Error loading rooms.';
+                    console.error(err);
+                });
+        });
+
+        function clearManualForm() {
+            document.getElementById('manual_action').value = 'add';
+            document.getElementById('manual_id').value = '';
+            document.getElementById('manual_gen').value = '';
+            document.getElementById('manual_batch').value = '';
+            document.getElementById('manual_course').innerHTML = '<option value="">Select Batch First</option>';
+            document.getElementById('manual_teacher_id').value = '';
+            document.getElementById('manual_teacher_name').value = '';
+            document.getElementById('manual_day').innerHTML = '<option value="">Select Day</option>';
+            document.getElementById('manual_timeslot').innerHTML = '<option value="">Select Timeslot</option>';
+            document.getElementById('manual_room').innerHTML = '<option value="">Select a day and timeslot first</option>';
+            document.getElementById('manual_room').disabled = true;
+            document.getElementById('manual_type').value = 'theory';
+            document.getElementById('manual_number').value = 1;
+            document.getElementById('roomLoadMsg').innerHTML = '';
+            fetch('?ajax=get_latest_gen').then(res=>res.json()).then(data=>{ if(data.gen) document.getElementById('manual_gen').value=data.gen; });
+        }
+
+        function editManualRoutine(data) {
+            document.getElementById('manual_action').value = 'update';
+            document.getElementById('manual_id').value = data.id;
+            document.getElementById('manual_gen').value = data.generation_id;
+            const batchSelect = document.getElementById('manual_batch');
+            batchSelect.value = data.batch_id;
+            batchSelect.dispatchEvent(new Event('change'));
+            setTimeout(() => {
+                const courseSelect = document.getElementById('manual_course');
+                courseSelect.value = data.course_id;
+                courseSelect.dispatchEvent(new Event('change'));
+            }, 300);
+            setTimeout(() => {
+                document.getElementById('manual_day').value = data.day;
+                document.getElementById('manual_day').dispatchEvent(new Event('change'));
+                setTimeout(() => {
+                    document.getElementById('manual_timeslot').value = data.timeslot_id;
+                    document.getElementById('manual_timeslot').dispatchEvent(new Event('change'));
+                    setTimeout(() => {
+                        document.getElementById('manual_room').value = data.classroom_id;
+                        document.getElementById('manual_type').value = data.session_type;
+                        document.getElementById('manual_number').value = data.session_number;
+                    }, 500);
+                }, 300);
+            }, 600);
+            new bootstrap.Modal(document.getElementById('manualRoutineModal')).show();
+        }
+
+        fetch('?ajax=get_latest_gen').then(res=>res.json()).then(data=>{ if(data.gen) document.getElementById('manual_gen').value=data.gen; });
+        </script>
         <?php endif; ?>
 
         <!-- CSV IMPORT -->
         <?php if($section == 'csv_import'): ?>
         <div class="section-card"><div class="section-title"><i class="fas fa-upload"></i> CSV Import Tools</div><p class="text-muted">Upload CSV files (headers required). Click "Example CSV" to download templates.</p>
-        <div class="row"><?php $imports = ['depts'=>'Departments','batches'=>'Batches','courses'=>'Courses','teachers'=>'Teachers','classrooms'=>'Classrooms','timeslots'=>'Time Slots','batch_courses'=>'Batch → Courses','teacher_courses'=>'Teacher → Courses']; foreach($imports as $key=>$label): ?><div class="col-md-6 col-lg-4 mb-3"><div class="card csv-card"><div class="card-body"><h5><?= $label ?></h5><a href="?export_template=<?= $key ?>" class="btn btn-sm btn-outline-primary mb-2"><i class="fas fa-download"></i> Example CSV</a><form method="POST" enctype="multipart/form-data"><input type="file" name="<?= $key ?>_csv" accept=".csv" class="form-control form-control-sm mb-2" required><button type="submit" name="import_<?= $key ?>" class="btn btn-sm btn-success">Import</button></form></div></div></div><?php endforeach; ?></div></div>
+        <div class="row"><?php $imports = ['depts'=>'Departments','batches'=>'Batches','courses'=>'Courses','teachers'=>'Teachers','classrooms'=>'Classrooms','timeslots'=>'Time Slots','batch_courses'=>'Batch → Courses','room_slots'=>'Room Slot Restrictions']; foreach($imports as $key=>$label): ?><div class="col-md-6 col-lg-4 mb-3"><div class="card csv-card"><div class="card-body"><h5><?= $label ?></h5><a href="?export_template=<?= $key ?>" class="btn btn-sm btn-outline-primary mb-2"><i class="fas fa-download"></i> Example CSV</a><form method="POST" enctype="multipart/form-data"><input type="file" name="<?= $key ?>_csv" accept=".csv" class="form-control form-control-sm mb-2" required><button type="submit" name="import_<?= $key ?>" class="btn btn-sm btn-success">Import</button></form></div></div></div><?php endforeach; ?></div></div>
         <?php endif; ?>
 
         <!-- ROUTINE VIEW -->
-      <?php if($section == 'routine'): ?>
-    <div class="section-card">
-        <h3>Class Routine (Latest Generation)</h3>
-
-        <!-- Batch নির্বাচন -->
-        <form method="GET" class="mb-3">
-            <input type="hidden" name="section" value="routine">
-            <select name="batch_id" class="form-select w-auto d-inline-block" onchange="this.form.submit()">
-                <option value="">-- Select Batch --</option>
-                <?php 
-                $batches->data_seek(0); 
-                while($b = $batches->fetch_assoc()): 
+        <?php if($section == 'routine'): ?>
+        <div class="section-card">
+            <h3>Class Routine (Latest Generation)</h3>
+            <form method="GET" class="mb-3">
+                <input type="hidden" name="section" value="routine">
+                <select name="batch_id" class="form-select w-auto d-inline-block" onchange="this.form.submit()">
+                    <option value="">-- Select Batch --</option>
+                    <?php $batches->data_seek(0); while($b = $batches->fetch_assoc()): ?>
+                    <option value="<?= $b['id'] ?>" <?= (isset($_GET['batch_id']) && $_GET['batch_id'] == $b['id']) ? 'selected' : '' ?>><?= $b['dept_name']." - Sem ".$b['semester'].$b['section']." (".$b['type'].")" ?></option>
+                    <?php endwhile; ?>
+                </select>
+                <select name="generation_id" class="form-select w-auto d-inline-block ms-2" onchange="this.form.submit()">
+                    <option value="">-- Latest Generation --</option>
+                    <?php $genRes = $conn->query("SELECT DISTINCT generation_id FROM routine_assignments ORDER BY generation_id DESC"); while($g = $genRes->fetch_assoc()): ?>
+                    <option value="<?= $g['generation_id'] ?>" <?= (isset($_GET['generation_id']) && $_GET['generation_id'] == $g['generation_id']) ? 'selected' : '' ?>>Generation <?= $g['generation_id'] ?></option>
+                    <?php endwhile; ?>
+                </select>
+            </form>
+            <?php if(isset($_GET['batch_id']) && $_GET['batch_id']): $bid = (int)$_GET['batch_id']; 
+                $batchInfo = $conn->query("SELECT type, off_day1, off_day2, department_id FROM batches WHERE id = $bid")->fetch_assoc();
+                if(!$batchInfo) { echo "<p>Invalid batch.</p>"; } else {
+                    $gen_id = isset($_GET['generation_id']) ? (int)$_GET['generation_id'] : $conn->query("SELECT MAX(generation_id) as gen FROM routine_assignments")->fetch_assoc()['gen'];
+                    if(!$gen_id) echo "<p>No routine generated yet.</p>";
+                    else {
+                        $allDays = ['Saturday','Sunday','Monday','Tuesday','Wednesday','Thursday','Friday'];
+                        $offDays = [$batchInfo['off_day1']];
+                        if(!empty($batchInfo['off_day2'])) $offDays[] = $batchInfo['off_day2'];
+                        $displayDays = array_diff($allDays, $offDays);
+                        if($batchInfo['type'] == 'Evening' && in_array('Friday', $offDays)) {
+                            $displayDays = array_merge($displayDays, ['Friday']);
+                            $displayDays = array_unique($displayDays);
+                        }
+                        usort($displayDays, function($a,$b) use ($allDays) { return array_search($a,$allDays) - array_search($b,$allDays); });
+                        $timeslotCategory = ($batchInfo['type'] == 'Evening') ? 'evening' : 'day';
+                        $slotsRes = $conn->query("SELECT * FROM timeslots WHERE category = '$timeslotCategory' ORDER BY start_time");
+                        $slotList = [];
+                        while($slot = $slotsRes->fetch_assoc()) $slotList[] = $slot;
                 ?>
-                    <option value="<?= $b['id'] ?>" 
-                        <?= (isset($_GET['batch_id']) && $_GET['batch_id'] == $b['id']) ? 'selected' : '' ?>>
-                        <?= $b['dept_name']." - Sem ".$b['semester'].$b['section']." (".$b['type'].")" ?>
-                    </option>
-                <?php endwhile; ?>
-            </select>
-        </form>
-
-        <?php if(isset($_GET['batch_id']) && $_GET['batch_id']): ?>
-            
-            <?php 
-            $bid = (int)$_GET['batch_id']; 
-            $gen_id = $conn->query("SELECT MAX(generation_id) as gen FROM routine_assignments")
-                           ->fetch_assoc()['gen']; 
-            ?>
-
-            <?php if(!$gen_id): ?>
-                <p>No routine generated yet.</p>
-            <?php else: ?>
-
                 <div class="table-responsive">
                     <table class="table table-bordered">
-                        <thead class="table-dark">
-                            <tr>
-                                <th>Time</th>
-                                <?php foreach($days as $d): ?>
-                                    <th><?= $d ?></th>
-                                <?php endforeach; ?>
-                            </tr>
-                        </thead>
-
+                        <thead class="table-dark"><tr><th>Time</th><?php foreach($displayDays as $d): ?><th><?= $d ?></th><?php endforeach; ?></tr></thead>
                         <tbody>
-                            <?php foreach($timeslot_list as $slot): ?>
-                                <tr>
-                                    <td class="bg-light">
-                                        <?= date('h:i A', strtotime($slot['start_time'])) . ' - ' . date('h:i A', strtotime($slot['end_time'])) ?>
-                                    </td>
-
-                                    <?php foreach($days as $day): ?>
-                                        <td>
-                                            <?php 
-                                            $res = $conn->query("
-                                                SELECT c.code, u.username as teacher, cr.room_name 
-                                                FROM routine_assignments ra 
-                                                JOIN courses c ON ra.course_id = c.id 
-                                                JOIN teachers t ON ra.teacher_id = t.id 
-                                                JOIN users u ON t.user_id = u.id 
-                                                JOIN classrooms cr ON ra.classroom_id = cr.id 
-                                                WHERE ra.batch_id = $bid 
-                                                AND ra.day = '$day' 
-                                                AND ra.timeslot_id = {$slot['id']} 
-                                                AND ra.generation_id = $gen_id
-                                            ");
-
-                                            while($row = $res->fetch_assoc()):
-                                            ?>
-                                                <div>
-                                                    <strong><?= $row['code'] ?></strong><br>
-                                                    <?= $row['teacher'] ?><br>
-                                                    <small><?= $row['room_name'] ?></small>
-                                                </div>
-                                            <?php endwhile; ?>
-                                        </td>
-                                    <?php endforeach; ?>
-
-                                </tr>
+                        <?php foreach($slotList as $slot): ?>
+                        <tr>
+                            <td class="bg-light"><?= date('h:i A', strtotime($slot['start_time'])) . ' - ' . date('h:i A', strtotime($slot['end_time'])) ?></td>
+                            <?php foreach($displayDays as $day): ?>
+                            <td>
+                                <?php
+                                $res = $conn->query("
+                                    SELECT c.code, u.username as teacher, cr.room_name
+                                    FROM routine_assignments ra
+                                    JOIN courses c ON ra.course_id = c.id
+                                    JOIN teachers t ON ra.teacher_id = t.id
+                                    JOIN users u ON t.user_id = u.id
+                                    JOIN classrooms cr ON ra.classroom_id = cr.id
+                                    WHERE ra.batch_id = $bid
+                                      AND ra.day = '$day'
+                                      AND ra.timeslot_id = {$slot['id']}
+                                      AND ra.generation_id = $gen_id
+                                ");
+                                while($row = $res->fetch_assoc()):
+                                ?>
+                                    <div><strong><?= $row['code'] ?></strong><br><?= $row['teacher'] ?><br><small><?= $row['room_name'] ?></small></div>
+                                <?php endwhile; ?>
+                            </td>
                             <?php endforeach; ?>
+                        </tr>
+                        <?php endforeach; ?>
                         </tbody>
                     </table>
                 </div>
-
-            <?php endif; ?>
-
-        <?php else: ?>
-            <p>Select a batch to view routine.</p>
-        <?php endif; ?>
-
-    </div>
-<?php endif; ?>
-
-        <!-- CONFLICTS -->
-        <?php if($section == 'conflicts'): ?>
-        <div class="section-card"><h3>Conflict Report (Latest Generation)</h3>
-        <?php $gen_id = $conn->query("SELECT MAX(generation_id) as last FROM routine_assignments")->fetch_assoc()['last'];
-        if(!$gen_id) echo "<p>No routine generated yet.</p>";
-        else {
-            $overload = $conn->query("SELECT teacher_id, day, COUNT(*) as cnt FROM routine_assignments WHERE generation_id=$gen_id GROUP BY teacher_id, day HAVING cnt > (SELECT max_classes_per_day FROM teachers WHERE id=teacher_id)");
-            if($overload->num_rows) { echo "<h5>⚠️ Teacher Overload</h5><ul>"; while($o=$overload->fetch_assoc()) echo "<li>Teacher {$o['teacher_id']} on {$o['day']}: {$o['cnt']} classes</li>"; echo "</ul>"; } else echo "<p>No overload conflicts.</p>";
-            $gaps = $conn->query("SELECT batch_id, day, GROUP_CONCAT(timeslot_id ORDER BY timeslot_id) as slots FROM routine_assignments WHERE generation_id=$gen_id GROUP BY batch_id, day");
-            echo "<h5>⏳ Batch Gaps</h5><ul>"; $hasGap=false; while($g=$gaps->fetch_assoc()){ $slots=explode(',',$g['slots']); for($i=0;$i<count($slots)-1;$i++) if($slots[$i+1]-$slots[$i]>1) { echo "<li>Batch {$g['batch_id']} on {$g['day']}: gap between {$slots[$i]} and {$slots[$i+1]}</li>"; $hasGap=true; } } if(!$hasGap) echo "<li>No gaps detected.</li>"; echo "</ul>";
-        } ?>
+                <div class="mt-3"><a href="?print_dept_routine=<?= $batchInfo['department_id'] ?>" class="btn btn-success" target="_blank"><i class="fas fa-print"></i> Print Department Routine (PDF)</a></div>
+                <?php } } ?>
+            <?php else: ?><p>Select a batch to view routine.</p><?php endif; ?>
         </div>
         <?php endif; ?>
     </div>
@@ -718,9 +1409,47 @@ $section = $_GET['section'] ?? 'dashboard';
 <div class="modal fade" id="courseModal" tabindex="-1"><div class="modal-dialog"><form method="POST" class="modal-content"><div class="modal-header"><h5>Course</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><input type="hidden" name="course_action" id="course_action" value="create"><input type="hidden" name="id" id="course_id"><select name="department_id" id="course_dept" class="form-select mb-2" required><?php $depts->data_seek(0); while($d=$depts->fetch_assoc()): ?><option value="<?= $d['id'] ?>"><?= $d['name'] ?></option><?php endwhile; ?></select><input name="title" id="course_title" class="form-control mb-2" placeholder="Title" required><input name="code" id="course_code" class="form-control mb-2" placeholder="Code" required><input name="credit" id="course_credit" step="0.5" class="form-control mb-2" placeholder="Credit" required><input name="weekly_classes" id="course_weekly" type="number" class="form-control" placeholder="Weekly Classes" required></div><div class="modal-footer"><button type="submit" class="btn btn-primary">Save</button></div></form></div></div>
 <div class="modal fade" id="teacherModal" tabindex="-1"><div class="modal-dialog"><form method="POST" class="modal-content"><div class="modal-header"><h5>Teacher</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><input type="hidden" name="teacher_action" id="teacher_action" value="create"><input type="hidden" name="id" id="teacher_id"><select name="user_id" id="teacher_user_id" class="form-select mb-2" required><option value="">Select User</option><?php $users->data_seek(0); while($u=$users->fetch_assoc()): ?><option value="<?= $u['id'] ?>"><?= $u['username']." (".$u['role'].")" ?></option><?php endwhile; ?></select><input name="teacher_id" id="teacher_code" class="form-control mb-2" placeholder="Teacher ID" required><input name="department" id="teacher_dept" class="form-control mb-2" placeholder="Department Code" required><input name="designation" id="teacher_desig" class="form-control mb-2" placeholder="Designation"><input name="max_classes_per_day" id="teacher_max" type="number" class="form-control mb-2" placeholder="Max Classes/Day"><input name="available_days" id="teacher_days" class="form-control" placeholder="Available days (comma separated)"></div><div class="modal-footer"><button type="submit" class="btn btn-primary">Save</button></div></form></div></div>
 <div class="modal fade" id="timeslotModal" tabindex="-1"><div class="modal-dialog"><form method="POST" class="modal-content"><div class="modal-header"><h5>Time Slot</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><input type="hidden" name="timeslot_action" id="timeslot_action" value="create"><input type="hidden" name="id" id="timeslot_id"><input type="time" name="start_time" id="ts_start" class="form-control mb-2" required><input type="time" name="end_time" id="ts_end" class="form-control" required></div><div class="modal-footer"><button type="submit" class="btn btn-primary">Save</button></div></form></div></div>
-<div class="modal fade" id="classroomModal" tabindex="-1"><div class="modal-dialog"><form method="POST" class="modal-content"><div class="modal-header"><h5>Classroom</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><input type="hidden" name="classroom_action" id="classroom_action" value="create"><input type="hidden" name="id" id="classroom_id"><input name="room_name" id="room_name" class="form-control mb-2" placeholder="Room Name" required><input name="capacity" id="capacity" type="number" class="form-control mb-2" placeholder="Capacity" required><select name="type" id="classroom_type" class="form-select mb-2"><option value="both">Both (Theory & Lab)</option><option value="theory">Theory Only</option><option value="lab">Lab Only</option></select><select name="department_id" id="classroom_dept" class="form-select mb-2"><option value="">Any Department</option><?php $depts->data_seek(0); while($d=$depts->fetch_assoc()): ?><option value="<?= $d['id'] ?>"><?= $d['name'] ?></option><?php endwhile; ?></select><div class="form-check"><input class="form-check-input" type="checkbox" name="has_projector" id="has_projector"><label>Projector</label></div><div class="form-check"><input class="form-check-input" type="checkbox" name="has_ac" id="has_ac"><label>AC</label></div></div><div class="modal-footer"><button type="submit" class="btn btn-primary">Save</button></div></form></div></div>
-<div class="modal fade" id="assignBatchCourseModal" tabindex="-1"><div class="modal-dialog"><form method="POST" class="modal-content"><div class="modal-header"><h5>Assign Courses to Batch</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><select name="batch_id" class="form-select mb-2" required><option value="">Select Batch</option><?php $batches->data_seek(0); while($b=$batches->fetch_assoc()): ?><option value="<?= $b['id'] ?>"><?= $b['dept_name']." - Sem ".$b['semester'].$b['section']." (".$b['type'].")" ?></option><?php endwhile; ?></select><select name="course_ids[]" multiple class="form-select" size="6" required><?php $courses->data_seek(0); while($c=$courses->fetch_assoc()): ?><option value="<?= $c['id'] ?>"><?= $c['code']." - ".$c['title'] ?></option><?php endwhile; ?></select><small>Hold Ctrl to select multiple</small></div><div class="modal-footer"><button type="submit" name="assign_batch_course" class="btn btn-primary">Assign</button></div></form></div></div>
-<div class="modal fade" id="assignTeacherCourseModal" tabindex="-1"><div class="modal-dialog"><form method="POST" class="modal-content"><div class="modal-header"><h5>Assign Courses to Teacher</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><select name="teacher_id" class="form-select mb-2" required><option value="">Select Teacher</option><?php $teachers->data_seek(0); while($t=$teachers->fetch_assoc()): ?><option value="<?= $t['id'] ?>"><?= $t['username']." (".$t['teacher_id'].")" ?></option><?php endwhile; ?></select><select name="course_ids[]" multiple class="form-select" size="6" required><?php $courses->data_seek(0); while($c=$courses->fetch_assoc()): ?><option value="<?= $c['id'] ?>"><?= $c['code']." - ".$c['title'] ?></option><?php endwhile; ?></select><small>Hold Ctrl to select multiple</small></div><div class="modal-footer"><button type="submit" name="assign_teacher_course" class="btn btn-primary">Assign</button></div></form></div></div>
+<div class="modal fade" id="classroomModal" tabindex="-1"><div class="modal-dialog"><form method="POST" class="modal-content"><div class="modal-header"><h5>Classroom</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><input type="hidden" name="classroom_action" id="classroom_action" value="create"><input type="hidden" name="id" id="classroom_id"><input name="room_name" id="room_name" class="form-control mb-2" placeholder="Room Name" required><input name="capacity" id="capacity" type="number" class="form-control mb-2" placeholder="Capacity" required><select name="type" id="classroom_type" class="form-select mb-2"><option value="both">Both (Theory & Lab)</option><option value="theory">Theory Only</option><option value="lab">Lab Only</option></select><select name="department_id" id="classroom_dept" class="form-select mb-2"><option value="">Any Department</option><?php $depts->data_seek(0); while($d=$depts->fetch_assoc()): ?><option value="<?= $d['id'] ?>"><?= $d['name'] ?></option><?php endwhile; ?></select><div class="form-check"><input class="form-check-input" type="checkbox" name="has_projector" id="has_projector" checked disabled><label>Projector (always)</label></div><div class="form-check"><input class="form-check-input" type="checkbox" name="has_ac" id="has_ac" checked disabled><label>AC (always)</label></div></div><div class="modal-footer"><button type="submit" class="btn btn-primary">Save</button></div></form></div></div>
+
+<!-- Batch-Course Assignment Modal -->
+<div class="modal fade" id="assignBatchCourseModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <form method="POST" class="modal-content">
+            <div class="modal-header"><h5>Assign Courses to Batch (teacher mandatory)</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <select name="batch_id" class="form-select mb-2" required>
+                    <option value="">Select Batch</option>
+                    <?php $batches->data_seek(0); while($b=$batches->fetch_assoc()): ?>
+                        <option value="<?= $b['id'] ?>"><?= $b['dept_name']." - Sem ".$b['semester'].$b['section']." (".$b['type'].")" ?></option>
+                    <?php endwhile; ?>
+                </select>
+                <div id="course-list">
+                    <table class="table table-sm" id="course-table">
+                        <thead><tr><th>Course</th><th>Assign Teacher (required)</th></tr></thead>
+                        <tbody>
+                            <?php $courses->data_seek(0); while($c=$courses->fetch_assoc()): ?>
+                            <tr>
+                                <td><input type="checkbox" name="course_ids[]" value="<?= $c['id'] ?>"> <?= $c['code']." - ".$c['title'] ?></td>
+                                <td>
+                                    <select name="teacher_ids[]" class="form-select form-select-sm">
+                                        <option value="" disabled selected>Select teacher</option>
+                                        <?php 
+                                        $teachers_list = $conn->query("SELECT t.id, u.username FROM teachers t JOIN users u ON t.user_id = u.id");
+                                        while($tch=$teachers_list->fetch_assoc()): ?>
+                                            <option value="<?= $tch['id'] ?>"><?= $tch['username'] ?></option>
+                                        <?php endwhile; ?>
+                                    </select>
+                                </td>
+                            </tr>
+                            <?php endwhile; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer"><button type="submit" name="assign_batch_course" class="btn btn-primary">Assign</button></div>
+        </form>
+    </div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
@@ -737,10 +1466,10 @@ function clearTeacherForm(){ document.getElementById('teacher_action').value='cr
 function editTeacher(id,user_id,teacher_id,dept,desig,max,days){ document.getElementById('teacher_action').value='update'; document.getElementById('teacher_id').value=id; document.getElementById('teacher_user_id').value=user_id; document.getElementById('teacher_code').value=teacher_id; document.getElementById('teacher_dept').value=dept; document.getElementById('teacher_desig').value=desig; document.getElementById('teacher_max').value=max; document.getElementById('teacher_days').value=days||''; new bootstrap.Modal(document.getElementById('teacherModal')).show(); }
 function clearTimeslotForm(){ document.getElementById('timeslot_action').value='create'; document.getElementById('timeslot_id').value=''; document.getElementById('ts_start').value=''; document.getElementById('ts_end').value=''; }
 function editTimeslot(id,start,end){ document.getElementById('timeslot_action').value='update'; document.getElementById('timeslot_id').value=id; document.getElementById('ts_start').value=start; document.getElementById('ts_end').value=end; new bootstrap.Modal(document.getElementById('timeslotModal')).show(); }
-function clearClassroomForm(){ document.getElementById('classroom_action').value='create'; document.getElementById('classroom_id').value=''; document.getElementById('room_name').value=''; document.getElementById('capacity').value=''; document.getElementById('classroom_type').value='both'; document.getElementById('classroom_dept').value=''; document.getElementById('has_projector').checked=false; document.getElementById('has_ac').checked=false; }
-function editClassroom(id,name,cap,dept_id,proj,ac,type){ document.getElementById('classroom_action').value='update'; document.getElementById('classroom_id').value=id; document.getElementById('room_name').value=name; document.getElementById('capacity').value=cap; document.getElementById('classroom_type').value=type; document.getElementById('classroom_dept').value=dept_id||''; document.getElementById('has_projector').checked=proj==1; document.getElementById('has_ac').checked=ac==1; new bootstrap.Modal(document.getElementById('classroomModal')).show(); }
+function clearClassroomForm(){ document.getElementById('classroom_action').value='create'; document.getElementById('classroom_id').value=''; document.getElementById('room_name').value=''; document.getElementById('capacity').value=''; document.getElementById('classroom_type').value='both'; document.getElementById('classroom_dept').value=''; document.getElementById('has_projector').checked=true; document.getElementById('has_ac').checked=true; }
+function editClassroom(id,name,cap,dept_id,proj,ac,type){ document.getElementById('classroom_action').value='update'; document.getElementById('classroom_id').value=id; document.getElementById('room_name').value=name; document.getElementById('capacity').value=cap; document.getElementById('classroom_type').value=type; document.getElementById('classroom_dept').value=dept_id||''; document.getElementById('has_projector').checked=true; document.getElementById('has_ac').checked=true; new bootstrap.Modal(document.getElementById('classroomModal')).show(); }
+function clearRoomSlotForm() { document.getElementById('room_slot_action').value = 'create'; document.getElementById('restriction_id').value = ''; document.getElementById('restriction_room').value = ''; document.getElementById('restriction_day').value = ''; document.getElementById('restriction_timeslot').value = ''; document.getElementById('restriction_dept').value = ''; }
 </script>
 </body>
-</html>
 </html>
 <?php $conn->close(); ?>
