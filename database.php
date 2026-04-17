@@ -1,14 +1,14 @@
 <?php
 $db_host = "localhost";
-$db_name = "rfnhscco_routine"; // তোমার phpMyAdmin এ এই নামে DB থাকতে হবে
+$db_name = "rfnhscco_routine";
 $db_user = "root";
-$db_pass = '';
+$db_pass = 'a';
 
 class Database {
     private $host = "localhost";
     private $db_name = "rfnhscco_routine";
-    private $username = "root";
-    private $password = '';
+    private $username = "rfnhscco_routine";
+    private $password = 'abO(sOQ}AhmZ$yd4';
     private $conn;
 
 
