@@ -1,6 +1,6 @@
 <?php
 
-
+// generate
 require_once '../../database.php';
 $conn = getDBConnection();
 if (!$conn) die("Database connection failed.");
