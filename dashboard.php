@@ -6,7 +6,7 @@ if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'admin') {
 }
 require_once 'database.php';
 
-// ---------- CSV TEMPLATE DOWNLOAD HANDLER ----------
+
 if (isset($_GET['export_template'])) {
     ob_clean();
     $template = $_GET['export_template'];
