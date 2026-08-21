@@ -135,9 +135,7 @@ function parseCSV($file, $hasHeader = true) {
 $msg = '';
 $error = '';
 
-// -------------------- CRUD HANDLERS --------------------
-
-// Create User
+// fucncm
 if (isset($_POST['create_user'])) {
     $role = $_POST['role'];
     $username = trim($_POST['username']);
