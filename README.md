@@ -121,18 +121,6 @@ Non-Functional Requirements
 
 
 
-SDLC Model
-
-The project follows the **Incremental SDLC Model** because:
-
-* The system is modular and medium-scale
-* Requirements may evolve over time
-* Early delivery and feedback are beneficial
-* Risk is lower compared to full upfront development
-
-Each module is designed, developed, tested, and delivered incrementally.
-
-
 
 Technology Stack
 
